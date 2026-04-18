@@ -33,7 +33,7 @@ plan for the full rationale and references.
 
 | # | Improvement | Ref | Status |
 |---|---|---|---|
-| 00 | Faithful GPT-2 124M on FineWeb-Edu-10B | — | pending |
+| 00 | Faithful GPT-2 124M on FineWeb-Edu-10B | — | **accepted** (val 3.040, HellaSwag 36.8 %, 190 k tok/s, 14 h 41 min) |
 | 01 | Block modernization: RoPE + RMSNorm + SwiGLU + QK-Norm | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | pending |
 | 02 | AdamW → Muon on hidden matmuls | [Muon blog](https://kellerjordan.github.io/posts/muon/) | pending |
 | 03 | Full modded-nanogpt recipe (ReLU², zero-init, embed-skip, logit softcap) | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | pending |
@@ -52,4 +52,4 @@ plan for the full rationale and references.
 
 | ID | Summary | Status | val_loss | tok/s | Verdict |
 |---|---|---|---|---|---|
-| 00-baseline | Faithful 124M on FW-Edu-10B | pending | — | — | — |
+| 00-baseline | Faithful 124M on FW-Edu-10B | accepted | **3.040** | 190 k | reference run; tagged `v0.1-baseline` @ `626509c` |
