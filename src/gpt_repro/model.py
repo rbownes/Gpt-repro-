@@ -1,8 +1,17 @@
-"""Faithful GPT-2 decoder-only transformer.
+"""Faithful GPT-2 decoder-only transformer, with optional modern-block variants.
 
-Parameter layout intentionally matches Hugging Face's `GPT2LMHeadModel` so that
-`tests/test_hf_weight_load.py` can load the released HF `gpt2` weights into this
-module and compare logits for architectural parity.
+Defaults reproduce the 2019 GPT-2 architecture exactly (LayerNorm, learned
+positional embeddings, GELU MLP, no QK-Norm). Config flags turn on modern
+replacements independently:
+
+    positional_encoding: 'learned' | 'rope'
+    norm_type:           'layernorm' | 'rmsnorm'
+    mlp_type:            'gelu' | 'swiglu'
+    qk_norm:             False | True
+
+The faithful config still parameter-matches Hugging Face's `GPT2LMHeadModel`
+so `tests/test_hf_weight_load.py` continues to load released HF `gpt2` weights
+into this module and verify logit parity.
 """
 
 from __future__ import annotations
@@ -27,6 +36,14 @@ class GPTConfig:
     attention_backend: str = "sdpa_flash"  # sdpa_flash | sdpa_cudnn | sdpa_math | sdpa_efficient | flash_attn_2
     tie_embeddings: bool = True
 
+    # --- Modern-block flags (faithful defaults) ------------------------------
+    positional_encoding: str = "learned"   # 'learned' | 'rope'
+    rope_base: float = 10000.0
+    norm_type: str = "layernorm"           # 'layernorm' | 'rmsnorm'
+    mlp_type: str = "gelu"                 # 'gelu' | 'swiglu'
+    mlp_hidden: int | None = None           # None = auto (4*d for gelu; explicit for swiglu)
+    qk_norm: bool = False
+
 
 _VALID_BACKENDS = {"sdpa_cudnn", "sdpa_flash", "sdpa_math", "sdpa_efficient", "flash_attn_2"}
 
@@ -41,16 +58,70 @@ def select_sdpa_backend_globally(name: str) -> None:
     process init is compile-safe and covers every attention call.
     """
     if name == "flash_attn_2":
-        # External kernel; we don't need to restrict torch's SDPA routing.
         return
     if name not in _VALID_BACKENDS:
         raise ValueError(f"Unknown attention backend: {name!r}")
     be = torch.backends.cuda
-    # Disable all, then enable the one we want.
     be.enable_flash_sdp(name == "sdpa_flash")
     be.enable_mem_efficient_sdp(name == "sdpa_efficient")
     be.enable_math_sdp(name == "sdpa_math")
     be.enable_cudnn_sdp(name == "sdpa_cudnn")
+
+
+# --- Norms ------------------------------------------------------------------
+
+
+class RMSNorm(nn.Module):
+    """Root-mean-square layer normalisation (Zhang & Sennrich 2019)."""
+
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Accumulate the norm in fp32 for stability under bf16.
+        dtype = x.dtype
+        xf = x.float()
+        rms = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return (xf * rms).to(dtype) * self.weight
+
+
+def make_norm(cfg: GPTConfig, dim: int) -> nn.Module:
+    if cfg.norm_type == "layernorm":
+        return nn.LayerNorm(dim, bias=cfg.bias)
+    if cfg.norm_type == "rmsnorm":
+        return RMSNorm(dim)
+    raise ValueError(f"Unknown norm_type: {cfg.norm_type!r}")
+
+
+# --- Rotary position embedding ---------------------------------------------
+
+
+def rope_freqs(head_dim: int, max_seqlen: int, base: float, device: torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute cos / sin of shape [max_seqlen, head_dim] for paired-half RoPE."""
+    half = head_dim // 2
+    theta = 1.0 / (base ** (torch.arange(0, half, dtype=torch.float32, device=device) / half))
+    t = torch.arange(max_seqlen, dtype=torch.float32, device=device)
+    freqs = torch.outer(t, theta)              # [T, D/2]
+    cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)  # [T, D]
+    sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1)  # [T, D]
+    return cos, sin
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply RoPE to `x` with shape [..., T, D].
+
+    `cos`, `sin` are [T, D] (same T and D as `x`'s last two dims). Rotation is
+    paired-halves (Llama convention).
+    """
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half], x[..., half:]
+    rot = torch.cat([-x2, x1], dim=-1)
+    return (x * cos + rot * sin).to(x.dtype)
+
+
+# --- Attention -------------------------------------------------------------
 
 
 class CausalSelfAttention(nn.Module):
@@ -64,16 +135,33 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
         self.dropout = cfg.dropout
         self.use_flash_attn_2 = cfg.attention_backend == "flash_attn_2"
+        self.use_rope = cfg.positional_encoding == "rope"
+        self.use_qk_norm = cfg.qk_norm
+        if cfg.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor | None = None,
+        sin: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         B, T, C = x.size()
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.use_rope:
+            assert cos is not None and sin is not None, "RoPE requires cos/sin"
+            q = apply_rope(q, cos, sin)
+            k = apply_rope(k, cos, sin)
+
         if self.use_flash_attn_2:
-            # Opt-in external kernel. Imported lazily so core deps stay small.
             from flash_attn import flash_attn_func  # type: ignore
 
             y = flash_attn_func(
@@ -82,9 +170,6 @@ class CausalSelfAttention(nn.Module):
                 causal=True,
             ).transpose(1, 2)
         else:
-            # SDPA backend was selected globally at process init via
-            # `select_sdpa_backend_globally` (torch globals compose with
-            # torch.compile, unlike per-forward sdpa_kernel context managers).
             y = F.scaled_dot_product_attention(
                 q, k, v,
                 is_causal=True,
@@ -94,53 +179,115 @@ class CausalSelfAttention(nn.Module):
         return self.c_proj(y)
 
 
-class MLP(nn.Module):
+# --- MLPs ------------------------------------------------------------------
+
+
+class GELUMLP(nn.Module):
+    """Faithful GPT-2 MLP: 2 matrices, hidden = 4 * d, GELU (tanh approx)."""
+
     def __init__(self, cfg: GPTConfig):
         super().__init__()
-        self.c_fc = nn.Linear(cfg.n_embd, 4 * cfg.n_embd, bias=cfg.bias)
-        self.c_proj = nn.Linear(4 * cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        hidden = cfg.mlp_hidden or (4 * cfg.n_embd)
+        self.c_fc = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
+        self.c_proj = nn.Linear(hidden, cfg.n_embd, bias=cfg.bias)
         self.dropout = nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.dropout(self.c_proj(F.gelu(self.c_fc(x), approximate="tanh")))
 
 
+class SwiGLU(nn.Module):
+    """SwiGLU MLP (Shazeer 2020).
+
+    Three matrices — `w_gate`, `w_up`, `w_down`. With hidden = 8/3 * d, total
+    params match the GELU MLP at hidden = 4 * d. For our 124M (d=768), we use
+    hidden = 2048 to exactly match 4*768*2 = 2048*3 params.
+    """
+
+    def __init__(self, cfg: GPTConfig):
+        super().__init__()
+        hidden = cfg.mlp_hidden
+        assert hidden is not None, "SwiGLU requires explicit mlp_hidden"
+        self.w_gate = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
+        self.w_up = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
+        self.w_down = nn.Linear(hidden, cfg.n_embd, bias=cfg.bias)
+        self.dropout = nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dropout(self.w_down(F.silu(self.w_gate(x)) * self.w_up(x)))
+
+
+def make_mlp(cfg: GPTConfig) -> nn.Module:
+    if cfg.mlp_type == "gelu":
+        return GELUMLP(cfg)
+    if cfg.mlp_type == "swiglu":
+        return SwiGLU(cfg)
+    raise ValueError(f"Unknown mlp_type: {cfg.mlp_type!r}")
+
+
+# --- Block -----------------------------------------------------------------
+
+
 class Block(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(cfg.n_embd, bias=cfg.bias)
+        self.use_rope = cfg.positional_encoding == "rope"
+        # Keep the faithful parameter names (ln_1, ln_2, attn, mlp) so the HF
+        # weight loader continues to work on the faithful config. The class of
+        # `ln_1`/`ln_2` varies with `cfg.norm_type`; HF gpt2 weights only load
+        # into LayerNorm-shaped keys, which is the faithful default.
+        self.ln_1 = make_norm(cfg, cfg.n_embd)
         self.attn = CausalSelfAttention(cfg)
-        self.ln_2 = nn.LayerNorm(cfg.n_embd, bias=cfg.bias)
-        self.mlp = MLP(cfg)
+        self.ln_2 = make_norm(cfg, cfg.n_embd)
+        self.mlp = make_mlp(cfg)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln_1(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor | None = None,
+        sin: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x), cos=cos, sin=sin)
         x = x + self.mlp(self.ln_2(x))
         return x
+
+
+# --- Top-level model --------------------------------------------------------
 
 
 class GPT(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         self.cfg = cfg
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Embedding(cfg.vocab_size, cfg.n_embd),
-                wpe=nn.Embedding(cfg.block_size, cfg.n_embd),
-                drop=nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity(),
-                h=nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)]),
-                ln_f=nn.LayerNorm(cfg.n_embd, bias=cfg.bias),
-            )
-        )
+        self.use_rope = cfg.positional_encoding == "rope"
+
+        modules: dict[str, nn.Module] = {
+            "wte": nn.Embedding(cfg.vocab_size, cfg.n_embd),
+            "drop": nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity(),
+            "h": nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)]),
+            "ln_f": make_norm(cfg, cfg.n_embd),
+        }
+        if not self.use_rope:
+            modules["wpe"] = nn.Embedding(cfg.block_size, cfg.n_embd)
+        self.transformer = nn.ModuleDict(modules)
+
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         if cfg.tie_embeddings:
             self.lm_head.weight = self.transformer.wte.weight
 
+        if self.use_rope:
+            head_dim = cfg.n_embd // cfg.n_head
+            cos, sin = rope_freqs(head_dim, cfg.block_size, cfg.rope_base)
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
+
         self.apply(self._init_weights)
-        # Residual projection init per GPT-2 paper: scale by 1/sqrt(2*n_layer).
+        # Residual-projection init per GPT-2 paper: N(0, 0.02 / sqrt(2*n_layer)).
+        # Applies to the projections out of attention and MLP regardless of
+        # which MLP variant is active (c_proj for GELU, w_down for SwiGLU).
         scale = 1.0 / math.sqrt(2 * cfg.n_layer)
         for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
+            if pn.endswith((".c_proj.weight", ".w_down.weight")):
                 nn.init.normal_(p, mean=0.0, std=0.02 * scale)
 
     @staticmethod
@@ -154,7 +301,7 @@ class GPT(nn.Module):
 
     def num_params(self, non_embedding: bool = True) -> int:
         n = sum(p.numel() for p in self.parameters())
-        if non_embedding:
+        if non_embedding and "wpe" in self.transformer:
             n -= self.transformer.wpe.weight.numel()
         return n
 
@@ -165,15 +312,24 @@ class GPT(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         B, T = idx.shape
         assert T <= self.cfg.block_size, f"sequence length {T} > block_size {self.cfg.block_size}"
-        pos = torch.arange(T, device=idx.device, dtype=torch.long)
-        x = self.transformer.wte(idx) + self.transformer.wpe(pos)
+
+        x = self.transformer.wte(idx)
+        if not self.use_rope:
+            pos = torch.arange(T, device=idx.device, dtype=torch.long)
+            x = x + self.transformer.wpe(pos)
         x = self.transformer.drop(x)
+
+        if self.use_rope:
+            cos = self.rope_cos[:T]
+            sin = self.rope_sin[:T]
+        else:
+            cos = sin = None
+
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, cos=cos, sin=sin)
         x = self.transformer.ln_f(x)
 
         if targets is None:
-            # Inference path: only compute logits on the last position to save memory.
             logits = self.lm_head(x[:, [-1], :])
             return logits, None
 
@@ -205,7 +361,7 @@ class GPT(nn.Module):
             idx = torch.cat([idx, next_id], dim=1)
         return idx
 
-    # ---- HF weight loading (for correctness parity tests) -------------------
+    # ---- HF weight loading (only valid on faithful config) ------------------
     @classmethod
     def from_pretrained_gpt2(
         cls,
@@ -213,16 +369,10 @@ class GPT(nn.Module):
         *,
         attention_backend: str = "sdpa_math",
     ) -> "GPT":
-        """Load released HF GPT-2 weights into this module.
+        """Load released HF GPT-2 weights into this module (faithful config only).
 
-        HF uses `transformers.pytorch_utils.Conv1D` instead of `nn.Linear` in the
-        attention/MLP projections; its `.weight` is the transpose of a Linear's.
-        We copy with an explicit transpose so our `nn.Linear` modules match
-        HF's computation exactly.
-
-        `attention_backend` defaults to `sdpa_math` because this path is used
-        mainly for correctness checks that often run on CPU; pass
-        `attention_backend="sdpa_cudnn"` when loading for GPU inference.
+        HF's `transformers.pytorch_utils.Conv1D` stores weights as the transpose
+        of `nn.Linear`, so we explicitly transpose on copy.
         """
         from transformers import GPT2LMHeadModel  # type: ignore
 
@@ -237,6 +387,7 @@ class GPT(nn.Module):
             vocab_size=50257,
             block_size=1024,
             attention_backend=attention_backend,
+            # All modern flags left at faithful defaults.
         )
         model = cls(cfg)
 
@@ -244,9 +395,7 @@ class GPT(nn.Module):
         hf_sd = hf.state_dict()
         sd = model.state_dict()
 
-        # Keys we do not expect to find / do not want to copy.
-        hf_skip = {"lm_head.weight"}  # tied; copied from wte
-        # HF Conv1D weights are transposed vs nn.Linear.
+        hf_skip = {"lm_head.weight"}
         transpose_suffixes = (
             "attn.c_attn.weight",
             "attn.c_proj.weight",
@@ -258,7 +407,6 @@ class GPT(nn.Module):
             if k in hf_skip:
                 continue
             if k.endswith(".attn.masked_bias") or k.endswith(".attn.bias"):
-                # HF stores the causal mask as a buffer; we use SDPA is_causal instead.
                 continue
             assert k in sd, f"HF key {k!r} not in our state dict"
             target = sd[k]
