@@ -35,7 +35,7 @@ plan for the full rationale and references.
 |---|---|---|---|
 | 00 | Faithful GPT-2 124M on FineWeb-Edu-10B | — | **accepted** (val 3.040, HellaSwag 36.8 %, 190 k tok/s, 14 h 41 min) |
 | 01 | Block modernization: RoPE + RMSNorm + SwiGLU + QK-Norm | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | **accepted** (val 2.988, HellaSwag 38.3 %, 182 k tok/s, 15 h 20 min) |
-| 02 | AdamW → Muon on hidden matmuls | [Muon blog](https://kellerjordan.github.io/posts/muon/) | pending |
+| 02 | AdamW → Muon on hidden matmuls | [Muon blog](https://kellerjordan.github.io/posts/muon/) | **rejected** (val Δ only −0.0007 @ 10 B; time-to-target-loss is 14–25 % faster though; tok/s −0.7 %) |
 | 03 | Full modded-nanogpt recipe (ReLU², zero-init, embed-skip, logit softcap) | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | pending |
 | 04 | FP8 matmul via TransformerEngine | [TE](https://github.com/NVIDIA/TransformerEngine) | pending |
 | 05 | μP / μTransfer HP sweep on 20 M proxy | [mup](https://github.com/microsoft/mup) | pending |
@@ -54,3 +54,4 @@ plan for the full rationale and references.
 |---|---|---|---|---|---|
 | 00-baseline | Faithful 124M on FW-Edu-10B | accepted | **3.040** | 190 k | reference run; tagged `v0.1-baseline` @ `626509c` |
 | 01-modern-block | RoPE + RMSNorm + SwiGLU + QK-Norm | accepted | **2.988** (Δ −0.052) | 182 k (−4.4 %) | accept; HellaSwag +1.5 pp; tagged `v0.2-exp01` |
+| 02-muon | AdamW → Muon (hidden matmuls) | rejected | 2.988 (Δ −0.0007) | 180 k (−0.7 %) | reject on val-loss axis; time-to-val-3.1 −14 %; null-result report preserved |

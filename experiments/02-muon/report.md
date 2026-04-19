@@ -1,6 +1,6 @@
 ---
 id: 02-muon
-status: in-progress
+status: rejected
 baseline_run: runs/01-modern-block/
 experiment_run: runs/02-muon/
 baseline_tag: v0.2-exp01
@@ -109,17 +109,76 @@ the Muon author recommends.
 
 ## Result
 
-(To be filled in after training completes.)
-
 | metric                          | baseline (v0.2) | exp/02 | Δ |
 |---------------------------------|---------------:|-------:|---:|
-| val loss @ 1 B tokens           | 3.4641         |        |   |
-| val loss @ 5 B tokens           | 3.1009         |        |   |
-| val loss @ 10 B tokens          | 2.9884         |        |   |
-| tokens / s median               | 181 732        |        |   |
-| wall-clock 1 epoch              | 15 h 20 min    |        |   |
-| HellaSwag acc (1 000 examples)  | 0.3830         |        |   |
+| val loss @ 1 B tokens           | 3.4641         | **3.3753** | **−0.089** |
+| val loss @ 5 B tokens           | 3.1009         | **3.0792** | **−0.022** |
+| val loss @ 10 B tokens (best)   | 2.9884         | **2.9877** | **−0.0007** |
+| val loss (200-batch held-out)   | 2.9946         | 2.9945   | −0.0001 |
+| HellaSwag acc (1 000 examples)  | 0.3830         | **0.3850** | +0.002 (+0.2 pp) |
+| tokens / s median               | 181 732        | 180 476  | **−0.7 %** |
+| tokens / s mean                 | 181 240        | 179 893  | −0.7 % |
+| wall-clock 1 epoch              | 15 h 20 min    | 15 h 27 min | +7 min |
+| time to val loss 3.5            | 96.6 min       | **72.8 min** | **−25 %** |
+| time to val loss 3.2            | 290 min        | **243 min**  | **−16 %** |
+| time to val loss 3.10           | 483 min        | **413 min**  | **−14 %** |
+| time to val loss ≈ 2.99         | N/A (baseline's ≈final) | 899 min | ~97 % of baseline wall-clock |
+
+### Predicted vs actual
+
+- Predicted val loss Δ: **−0.03 to −0.10** (point **−0.05**). Actual: **−0.0007** — **miss**.
+  The gap collapsed steadily through training: −0.46 at step 500, −0.11 at 1 500,
+  −0.04 at 5 000, −0.01 at 13 500, ~0 at the end. Cosine decay + enough tokens
+  lets AdamW catch up completely.
+- Predicted tok/s Δ: **−2 % to +1 %**. Actual: **−0.7 %** — in range.
+  The smoke run suggested −10 %; that was compile-warmup noise and small-batch
+  dominance of the Newton-Schulz step. Steady-state on the full run is
+  essentially neutral on SM_120. Prior under-estimate of Muon's kernel overhead
+  was wrong; the honest number is near-free.
+- Predicted HellaSwag Δ: **+0.5 to +2 pp**. Actual: **+0.2 pp** — below range
+  but directionally consistent.
+
+### What actually went on
+
+Muon converges to **the same loss** as AdamW on this setup. It also *gets
+there sooner* — 25 % faster to val loss 3.5, 14 % faster to 3.1 — consistent
+with the mechanism (orthogonal updates help escape the warmup region faster).
+But on a fixed 10 B-token budget with cosine decay to 10 % peak, AdamW has
+enough steps to match Muon's late-training behaviour, so the asymptotic
+val loss is a dead tie.
+
+This is a **documented null result at 124 M × 10 B tokens**, not a Muon bug.
+At larger scale (Kimi K2, DeepSeek-V3, INTELLECT-3) Muon still wins because
+those runs never converge the optimizer curves. Here we *do* converge them.
 
 ## Verdict
 
-(Pending.)
+**Reject.** The pre-declared accept criterion was val loss Δ ≥ 0.03 at 10 B
+tokens; actual is −0.0007. Even though Muon comfortably cleared the throughput
+budget (−0.7 % vs −5 % allowed) and posted a real time-to-intermediate-loss
+win, the chosen primary metric was asymptotic loss at fixed tokens, and on
+that metric Muon did not beat AdamW.
+
+### What we learned that the null result doesn't hide
+
+1. **Muon is ~free on SM_120.** The tok/s regression I feared didn't
+   materialize steady-state. Future experiments with truncated schedules
+   or early-stopping could adopt Muon at effectively zero cost.
+2. **Time-to-target-loss is a real axis Muon wins on.** If the goal ever
+   shifts from "10 B tokens" to "shortest wall-clock to val loss 3.1", Muon
+   is the right optimizer — 14 % faster, no stability issues.
+3. **Asymptotic-loss wins from Muon don't ship at 124 M × 10 B with full
+   cosine decay.** Don't bundle Muon into the full modded-nanogpt recipe
+   until we can run without full cosine decay (e.g. as part of μTransfer
+   sweeps that are LR-limited by time, not by target loss).
+
+### Follow-up
+
+- `v0.2-exp01` remains the baseline tag. **No new `v0.x` tag** — rejected
+  experiments don't advance the version.
+- `exp/02-muon` branch + this report committed and preserved for audit.
+- Next candidate is **exp/03: full modded-nanogpt recipe** (ReLU² MLP,
+  zero-init projections, embedding→block skip, logit softcap). The
+  speedrun work accumulates Muon *alongside* these tricks, not in isolation;
+  introducing them together may unlock Muon's edge on 10 B.
+
