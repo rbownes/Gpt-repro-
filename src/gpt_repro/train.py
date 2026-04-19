@@ -12,7 +12,7 @@ import torch
 
 from gpt_repro.data import DataConfig, ShardLoader
 from gpt_repro.model import GPT, GPTConfig, select_sdpa_backend_globally
-from gpt_repro.optim import build_optimizer, lr_at_step, set_lr
+from gpt_repro.optim import build_dual_optimizer, build_optimizer, lr_at_step, set_lr
 from gpt_repro.utils import (
     JSONLLogger,
     autocast_dtype,
@@ -58,6 +58,13 @@ class TrainConfig:
     log_every: int = 10
     ckpt_every: int = 2000
     keep_last_ckpt: int = 2
+
+    # Optimizer choice
+    optimizer_type: str = "adamw"       # "adamw" | "muon+adamw"
+    muon_peak_lr: float = 0.02
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    muon_ns_steps: int = 5
 
     # Run metadata
     run_dir: str = "runs/baseline"
@@ -120,19 +127,47 @@ def train(cfg: TrainConfig) -> None:
     ))
     print(f"train tokens: {train_loader.total_tokens:,} | val tokens: {val_loader.total_tokens:,}")
 
-    # Optimizer
-    optimizer = build_optimizer(
-        model,
-        lr=cfg.peak_lr,
-        weight_decay=cfg.weight_decay,
-        betas=(cfg.beta1, cfg.beta2),
-        eps=cfg.eps,
-    )
+    # Optimizer(s). A single AdamW covers the faithful and modern-block
+    # baselines; Muon + AdamW splits hidden matmul weights off to Muon.
+    if cfg.optimizer_type == "adamw":
+        adamw = build_optimizer(
+            model,
+            lr=cfg.peak_lr,
+            weight_decay=cfg.weight_decay,
+            betas=(cfg.beta1, cfg.beta2),
+            eps=cfg.eps,
+        )
+        muon = None
+        optimizers: list = [adamw]
+        print(f"optimizer: AdamW, {sum(len(g['params']) for g in adamw.param_groups)} param groups")
+    elif cfg.optimizer_type == "muon+adamw":
+        muon, adamw = build_dual_optimizer(
+            model,
+            muon_lr=cfg.muon_peak_lr,
+            muon_momentum=cfg.muon_momentum,
+            muon_nesterov=cfg.muon_nesterov,
+            muon_ns_steps=cfg.muon_ns_steps,
+            adamw_lr=cfg.peak_lr,
+            adamw_weight_decay=cfg.weight_decay,
+            adamw_betas=(cfg.beta1, cfg.beta2),
+            adamw_eps=cfg.eps,
+        )
+        optimizers = [muon, adamw]
+        muon_n = sum(p.numel() for g in muon.param_groups for p in g["params"])
+        adamw_n = sum(p.numel() for g in adamw.param_groups for p in g["params"])
+        print(
+            f"optimizer: Muon({muon_n/1e6:.1f}M params, peak_lr={cfg.muon_peak_lr}) "
+            f"+ AdamW({adamw_n/1e6:.1f}M params, peak_lr={cfg.peak_lr})"
+        )
+    else:
+        raise ValueError(f"unknown optimizer_type: {cfg.optimizer_type!r}")
 
     # Resume?
     start_step = 0
     if cfg.resume_from is not None:
-        ck = load_checkpoint(cfg.resume_from, model=model, optimizer=optimizer, map_location=device)
+        ck = load_checkpoint(cfg.resume_from, model=model, optimizer=adamw, map_location=device)
+        if muon is not None and "muon" in ck:
+            muon.load_state_dict(ck["muon"])
         start_step = int(ck.get("step", 0))
         print(f"resumed from {cfg.resume_from} @ step {start_step}")
 
@@ -155,17 +190,25 @@ def train(cfg: TrainConfig) -> None:
     t_start = time.monotonic()
     t_last_log = t_start
 
-    for step in range(start_step, cfg.total_steps):
-        lr = lr_at_step(
+    # Schedule driver: one scalar t that scales each optimizer's peak LR.
+    def schedule_t(step: int) -> float:
+        return lr_at_step(
             step,
-            peak_lr=cfg.peak_lr,
+            peak_lr=1.0,  # unit peak — scale per optimizer below
             warmup_steps=cfg.warmup_steps,
             total_steps=cfg.total_steps,
             min_lr_ratio=cfg.min_lr_ratio,
         )
-        set_lr(optimizer, lr)
 
-        optimizer.zero_grad(set_to_none=True)
+    for step in range(start_step, cfg.total_steps):
+        t = schedule_t(step)
+        adamw_lr = cfg.peak_lr * t
+        set_lr(adamw, adamw_lr)
+        if muon is not None:
+            set_lr(muon, cfg.muon_peak_lr * t)
+
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
         loss_accum = 0.0
         for _ in range(cfg.grad_accum):
             x, y = train_loader.next_batch(rng, device)
@@ -177,7 +220,9 @@ def train(cfg: TrainConfig) -> None:
 
         if cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        optimizer.step()
+        for opt in optimizers:
+            opt.step()
+        lr = adamw_lr  # for logging continuity
 
         if (step + 1) % cfg.log_every == 0 or step == start_step:
             now = time.monotonic()
@@ -206,19 +251,23 @@ def train(cfg: TrainConfig) -> None:
                 save_checkpoint(
                     Path(run_dir) / "best_val.pt",
                     model=getattr(model, "_orig_mod", model),
-                    optimizer=optimizer,
+                    optimizer=adamw,
                     step=step + 1,
                     config=cfg.model,
-                    extra={"val_loss": val_loss},
+                    extra={
+                        "val_loss": val_loss,
+                        **({"muon": muon.state_dict()} if muon is not None else {}),
+                    },
                 )
 
         if (step + 1) % cfg.ckpt_every == 0:
             save_checkpoint(
                 Path(run_dir) / f"step_{step+1}.pt",
                 model=getattr(model, "_orig_mod", model),
-                optimizer=optimizer,
+                optimizer=adamw,
                 step=step + 1,
                 config=cfg.model,
+                extra=({"muon": muon.state_dict()} if muon is not None else None),
             )
             rotate_checkpoints(run_dir, cfg.keep_last_ckpt)
 

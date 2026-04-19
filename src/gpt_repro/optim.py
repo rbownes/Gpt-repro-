@@ -13,10 +13,23 @@ import math
 import torch
 import torch.nn as nn
 
+from gpt_repro.muon import Muon
+
+
+# Hidden matmul weights that Muon should handle. Anything else (embeddings,
+# norm scales, biases, QK-Norm scales, etc.) stays on AdamW.
+_MUON_SUFFIXES: tuple[str, ...] = (
+    "c_attn.weight",
+    "c_proj.weight",
+    "w_gate.weight",
+    "w_up.weight",
+    "w_down.weight",
+)
+
 
 def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
     decay, no_decay = [], []
-    for name, p in model.named_parameters():
+    for _name, p in model.named_parameters():
         if not p.requires_grad:
             continue
         if p.ndim < 2:
@@ -27,6 +40,27 @@ def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
         {"params": decay, "weight_decay": weight_decay},
         {"params": no_decay, "weight_decay": 0.0},
     ]
+
+
+def split_muon_adamw_params(model: nn.Module) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+    """Return `(muon_params, adamw_params)`.
+
+    Muon gets 2-D hidden matmul weights matched by suffix. AdamW gets the rest.
+    Duplicate parameters (e.g. tied lm_head/wte) are added only once on the
+    AdamW side.
+    """
+    muon_params: list[torch.nn.Parameter] = []
+    adamw_params: list[torch.nn.Parameter] = []
+    seen: set[int] = set()
+    for name, p in model.named_parameters():
+        if not p.requires_grad or id(p) in seen:
+            continue
+        seen.add(id(p))
+        if p.ndim == 2 and any(name.endswith(s) for s in _MUON_SUFFIXES):
+            muon_params.append(p)
+        else:
+            adamw_params.append(p)
+    return muon_params, adamw_params
 
 
 def build_optimizer(
@@ -67,3 +101,47 @@ def lr_at_step(
 def set_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
     for g in optimizer.param_groups:
         g["lr"] = lr
+
+
+def build_dual_optimizer(
+    model: nn.Module,
+    *,
+    muon_lr: float,
+    muon_momentum: float,
+    muon_nesterov: bool,
+    muon_ns_steps: int,
+    adamw_lr: float,
+    adamw_weight_decay: float,
+    adamw_betas: tuple[float, float],
+    adamw_eps: float,
+    fused: bool = True,
+) -> tuple[Muon, torch.optim.AdamW]:
+    """Build a (Muon, AdamW) pair with parameters split by role.
+
+    Muon handles 2-D hidden matmul weights; AdamW handles embeddings, norm
+    scales, biases, and any non-hidden matmul weight. Both optimizers receive
+    independent peak learning rates so the schedule can be shared but their
+    magnitudes differ.
+    """
+    muon_params, adamw_params = split_muon_adamw_params(model)
+    if not muon_params:
+        raise ValueError("No parameters matched for Muon — check suffix list.")
+    muon = Muon(
+        muon_params,
+        lr=muon_lr,
+        momentum=muon_momentum,
+        nesterov=muon_nesterov,
+        ns_steps=muon_ns_steps,
+    )
+    # Split AdamW params by decay-eligibility just like build_param_groups.
+    decay = [p for p in adamw_params if p.ndim >= 2]
+    no_decay = [p for p in adamw_params if p.ndim < 2]
+    adamw_groups = [
+        {"params": decay, "weight_decay": adamw_weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+    try:
+        adamw = torch.optim.AdamW(adamw_groups, lr=adamw_lr, betas=adamw_betas, eps=adamw_eps, fused=fused)
+    except (RuntimeError, TypeError):
+        adamw = torch.optim.AdamW(adamw_groups, lr=adamw_lr, betas=adamw_betas, eps=adamw_eps)
+    return muon, adamw
