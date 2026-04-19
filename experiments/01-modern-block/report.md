@@ -1,10 +1,10 @@
 ---
 id: 01-modern-block
-status: in-progress
+status: accepted
 baseline_run: runs/baseline/
 experiment_run: runs/01-modern-block/
 baseline_tag: v0.1-baseline
-date: 2026-04-18
+date: 2026-04-19
 author: rjbownes
 seeds: [0]
 ---
@@ -108,17 +108,44 @@ is **~0.05 – 0.15 val-loss reduction at fixed tokens**.
 
 ## Result
 
-(To be filled in after training completes. See accept/reject criteria above.)
+| metric                          | baseline | exp/01 | Δ |
+|---------------------------------|---------:|-------:|---:|
+| val loss @ 1 B tokens           | 3.5984   | **3.4641** | **−0.134** |
+| val loss @ 5 B tokens           | 3.1669   | **3.1009** | **−0.066** |
+| val loss @ 10 B tokens (best)   | 3.0402   | **2.9884** | **−0.052** |
+| val loss (200-batch held-out)   | 3.0473   | **2.9946** | **−0.053** |
+| HellaSwag acc (1 000 examples)  | 0.3680   | **0.3830** | **+0.015** |
+| tokens / s median               | 190 004  | 181 732    | −4.4 %  |
+| tokens / s mean                 | 189 345  | 181 240    | −4.3 %  |
+| wall-clock 1 epoch              | 14 h 41 min | 15 h 20 min | +39 min |
+| time to val loss 3.5            | 140 min  | **96.6 min**  | **−31 %** |
+| time to val loss 3.2            | 394 min  | **290 min**   | **−26 %** |
+| time to val loss 3.10           | 601 min  | **483 min**   | **−20 %** |
+| time to val loss 3.04 (baseline's final) | N/A | **652 min** | matches baseline quality in **74 %** of baseline wall-clock |
 
-| metric                          | baseline | experiment | Δ |
-|---------------------------------|---------:|-----------:|---|
-| val loss @ 1 B tokens           | 3.5984   |            |   |
-| val loss @ 5 B tokens           | 3.1669   |            |   |
-| val loss @ 10 B tokens          | 3.0407   |            |   |
-| tokens / s median               | 190 004  |            |   |
-| wall-clock 1 epoch              | 14 h 41 min |         |   |
-| HellaSwag acc (1 000 examples)  | 0.3680   |            |   |
+### Predicted vs actual
+
+- Predicted val loss Δ: **−0.05 to −0.12** (point **−0.08**). Actual: **−0.052** — landed at the bottom of the predicted range. A respectful win but *smaller* than the point estimate, which is worth noting: the modernization wins most of its edge early in training (−0.134 at 1 B tokens, shrinking to −0.052 by 10 B) because both curves are still converging and faithful GPT-2 catches up with enough tokens.
+- Predicted tok/s Δ: **−3 % to +5 %**. Actual: **−4.4 %** — slightly worse than the range, but within the 5 % accept threshold. The SwiGLU extra matmul + two RMSNorms for QK-Norm dominate the cost; RMSNorm was not fast enough to offset.
+- Predicted HellaSwag Δ: **+0.5 to +2 pp**. Actual: **+1.5 pp** — mid-range.
+
+### Loss curve shape
+
+Modern config is consistently ahead of faithful at every eval step after step 500. The Δ is largest early (−0.61 at step 500, −0.27 at step 1 000) and converges asymptotically (−0.05 by step 19 073). This is consistent with the "cleaner gradient flow early" reading of RMSNorm + QK-Norm — they mostly save you from the awkward warmup phase.
 
 ## Verdict
 
-(Pending.)
+**Accept.** All pre-declared criteria met:
+
+- val loss @ 10 B Δ: **−0.052** (required ≥ −0.05) ✅
+- tok/s regression: **4.4 %** (required ≤ 5 %) ✅
+- No training instability; no NaN, no loss spikes, smooth cosine decay to completion.
+- HellaSwag +1.5 pp (secondary, pre-predicted range +0.5 to +2 pp) ✅
+
+**Advance `v0.2-exp01` tag** at this commit. Future experiments branch from
+**`v0.2-exp01`** and treat the modern block as the new faithful baseline.
+
+Explicitly not changing `configs/gpt2_124m.py` — that remains the faithful
+Radford baseline for reproducibility purposes; new experiments should fork
+`configs/gpt2_124m_modern.py` instead.
+
