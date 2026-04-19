@@ -186,3 +186,99 @@ def test_rope_freqs_basic_properties() -> None:
     # Paired halves: first 32 dims == last 32 dims.
     assert torch.allclose(cos[:, :32], cos[:, 32:])
     assert torch.allclose(sin[:, :32], sin[:, 32:])
+
+
+# ---- Modded-nanogpt tricks (exp/03) ---------------------------------------
+
+
+def _modernplus_cfg(**overrides) -> GPTConfig:
+    base = dict(
+        vocab_size=VOCAB_SIZE,
+        block_size=64,
+        n_layer=4,           # small but ≥ 2 so U-Net has something to skip
+        n_head=2,
+        n_embd=64,
+        attention_backend="sdpa_math",
+        positional_encoding="rope",
+        norm_type="rmsnorm",
+        mlp_type="relu2",
+        qk_norm=True,
+        zero_init_proj=True,
+        u_net_skips=True,
+        logit_softcap=30.0,
+    )
+    base.update(overrides)
+    return GPTConfig(**base)
+
+
+def test_relu2_mlp_forward() -> None:
+    cfg = _modernplus_cfg(u_net_skips=False, zero_init_proj=False, logit_softcap=None)
+    model = GPT(cfg)
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    logits, loss = model(x, x)
+    assert logits.shape == (2, cfg.block_size, cfg.vocab_size)
+    assert torch.isfinite(loss)
+
+
+def test_zero_init_proj_literally_zero() -> None:
+    cfg = _modernplus_cfg()
+    model = GPT(cfg)
+    zero_keys = [
+        n for n, _ in model.named_parameters()
+        if n.endswith((".c_proj.weight", ".w_down.weight"))
+    ]
+    assert zero_keys, "expected zero-initialised projection weights to exist"
+    for n in zero_keys:
+        p = dict(model.named_parameters())[n]
+        assert torch.all(p == 0), f"{n} not zero: max|p|={p.abs().max().item():.3e}"
+
+
+def test_zero_init_off_non_zero() -> None:
+    """With zero_init_proj=False, projections are non-zero (scaled init)."""
+    cfg = _modernplus_cfg(zero_init_proj=False)
+    model = GPT(cfg)
+    any_nonzero = False
+    for n, p in model.named_parameters():
+        if n.endswith((".c_proj.weight", ".w_down.weight")):
+            if p.abs().sum() > 0:
+                any_nonzero = True
+                break
+    assert any_nonzero
+
+
+def test_u_net_skip_wiring_stateless_on_shapes() -> None:
+    """Running the same input twice with U-Net skips gives identical output
+    (confirms the skip stack is properly rebuilt per-forward, not leaked)."""
+    cfg = _modernplus_cfg()
+    model = GPT(cfg).eval()
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    with torch.no_grad():
+        out1, _ = model(x, x)
+        out2, _ = model(x, x)
+    torch.testing.assert_close(out1, out2, atol=1e-5, rtol=1e-5)
+
+
+def test_logit_softcap_bounds_logits() -> None:
+    """With softcap=10, every returned logit lies in (-10, 10)."""
+    cfg = _modernplus_cfg(logit_softcap=10.0)
+    model = GPT(cfg).eval()
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    with torch.no_grad():
+        logits, _ = model(x, x)
+    assert logits.abs().max().item() < 10.0 + 1e-4
+
+
+def test_modernplus_overfit() -> None:
+    torch.manual_seed(0)
+    cfg = _modernplus_cfg(block_size=32)
+    model = GPT(cfg)
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
+    final = float("nan")
+    for _ in range(300):
+        opt.zero_grad()
+        _, loss = model(x, x)
+        loss.backward()
+        opt.step()
+        final = loss.item()
+    assert final < 0.5, f"modernplus overfit failed: final {final:.4f}"

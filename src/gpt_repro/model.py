@@ -6,8 +6,11 @@ replacements independently:
 
     positional_encoding: 'learned' | 'rope'
     norm_type:           'layernorm' | 'rmsnorm'
-    mlp_type:            'gelu' | 'swiglu'
+    mlp_type:            'gelu' | 'swiglu' | 'relu2'
     qk_norm:             False | True
+    zero_init_proj:      False | True        # modded-nanogpt out-proj zero init
+    u_net_skips:         False | True        # cross-depth skip connections
+    logit_softcap:       None | float        # s * tanh(logits / s) on head output
 
 The faithful config still parameter-matches Hugging Face's `GPT2LMHeadModel`
 so `tests/test_hf_weight_load.py` continues to load released HF `gpt2` weights
@@ -40,9 +43,14 @@ class GPTConfig:
     positional_encoding: str = "learned"   # 'learned' | 'rope'
     rope_base: float = 10000.0
     norm_type: str = "layernorm"           # 'layernorm' | 'rmsnorm'
-    mlp_type: str = "gelu"                 # 'gelu' | 'swiglu'
-    mlp_hidden: int | None = None           # None = auto (4*d for gelu; explicit for swiglu)
+    mlp_type: str = "gelu"                 # 'gelu' | 'swiglu' | 'relu2'
+    mlp_hidden: int | None = None          # None = auto (4*d for gelu/relu2; explicit for swiglu)
     qk_norm: bool = False
+
+    # --- Modded-nanogpt tricks (all default to faithful/off) -----------------
+    zero_init_proj: bool = False           # zero-init attn.c_proj and MLP out-projection
+    u_net_skips: bool = False              # second half of layers receive skip from first half
+    logit_softcap: float | None = None     # if set, logits go through s*tanh(x/s)
 
 
 _VALID_BACKENDS = {"sdpa_cudnn", "sdpa_flash", "sdpa_math", "sdpa_efficient", "flash_attn_2"}
@@ -196,6 +204,26 @@ class GELUMLP(nn.Module):
         return self.dropout(self.c_proj(F.gelu(self.c_fc(x), approximate="tanh")))
 
 
+class ReLU2MLP(nn.Module):
+    """ReLU-squared MLP (Primer, So et al. 2021; used in modded-nanogpt).
+
+    Same shape as GELUMLP — two matrices, hidden = 4 * d — just a different
+    activation. Empirically competitive with SwiGLU at small scale while
+    being cheaper (no gate pre-multiply, two matmuls instead of three).
+    """
+
+    def __init__(self, cfg: GPTConfig):
+        super().__init__()
+        hidden = cfg.mlp_hidden or (4 * cfg.n_embd)
+        self.c_fc = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
+        self.c_proj = nn.Linear(hidden, cfg.n_embd, bias=cfg.bias)
+        self.dropout = nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = F.relu(self.c_fc(x))
+        return self.dropout(self.c_proj(h * h))
+
+
 class SwiGLU(nn.Module):
     """SwiGLU MLP (Shazeer 2020).
 
@@ -222,6 +250,8 @@ def make_mlp(cfg: GPTConfig) -> nn.Module:
         return GELUMLP(cfg)
     if cfg.mlp_type == "swiglu":
         return SwiGLU(cfg)
+    if cfg.mlp_type == "relu2":
+        return ReLU2MLP(cfg)
     raise ValueError(f"Unknown mlp_type: {cfg.mlp_type!r}")
 
 
@@ -282,13 +312,18 @@ class GPT(nn.Module):
             self.register_buffer("rope_sin", sin, persistent=False)
 
         self.apply(self._init_weights)
-        # Residual-projection init per GPT-2 paper: N(0, 0.02 / sqrt(2*n_layer)).
-        # Applies to the projections out of attention and MLP regardless of
-        # which MLP variant is active (c_proj for GELU, w_down for SwiGLU).
-        scale = 1.0 / math.sqrt(2 * cfg.n_layer)
-        for pn, p in self.named_parameters():
-            if pn.endswith((".c_proj.weight", ".w_down.weight")):
-                nn.init.normal_(p, mean=0.0, std=0.02 * scale)
+        # Out-projection init:
+        # - default: N(0, 0.02 / sqrt(2 * n_layer))  (Radford et al. 2019 scaling)
+        # - zero_init_proj=True: literal zeros  (modded-nanogpt / ReZero)
+        if cfg.zero_init_proj:
+            for pn, p in self.named_parameters():
+                if pn.endswith((".c_proj.weight", ".w_down.weight")):
+                    nn.init.zeros_(p)
+        else:
+            scale = 1.0 / math.sqrt(2 * cfg.n_layer)
+            for pn, p in self.named_parameters():
+                if pn.endswith((".c_proj.weight", ".w_down.weight")):
+                    nn.init.normal_(p, mean=0.0, std=0.02 * scale)
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -304,6 +339,12 @@ class GPT(nn.Module):
         if non_embedding and "wpe" in self.transformer:
             n -= self.transformer.wpe.weight.numel()
         return n
+
+    def _maybe_softcap(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.cfg.logit_softcap is not None:
+            s = self.cfg.logit_softcap
+            return s * torch.tanh(logits / s)
+        return logits
 
     def forward(
         self,
@@ -325,15 +366,30 @@ class GPT(nn.Module):
         else:
             cos = sin = None
 
-        for block in self.transformer.h:
-            x = block(x, cos=cos, sin=sin)
+        blocks = self.transformer.h
+        if self.cfg.u_net_skips:
+            # U-Net style cross-depth shortcuts: layer i ≥ n/2 adds the
+            # post-block output of layer n-1-i to its input. First half
+            # pushes onto a LIFO, second half pops. Matches modded-nanogpt.
+            n = len(blocks)
+            half = n // 2
+            skip_stack: list[torch.Tensor] = []
+            for i, block in enumerate(blocks):
+                if i >= half:
+                    x = x + skip_stack.pop()
+                x = block(x, cos=cos, sin=sin)
+                if i < half:
+                    skip_stack.append(x)
+        else:
+            for block in blocks:
+                x = block(x, cos=cos, sin=sin)
         x = self.transformer.ln_f(x)
 
         if targets is None:
-            logits = self.lm_head(x[:, [-1], :])
+            logits = self._maybe_softcap(self.lm_head(x[:, [-1], :]))
             return logits, None
 
-        logits = self.lm_head(x)
+        logits = self._maybe_softcap(self.lm_head(x))
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)),
             targets.view(-1),
