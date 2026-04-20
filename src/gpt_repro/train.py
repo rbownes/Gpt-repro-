@@ -63,6 +63,7 @@ class TrainConfig:
     run_dir: str = "runs/baseline"
     seed: int = 0
     compile: bool = True
+    compile_mode: str = "default"   # "default" | "reduce-overhead" | "max-autotune"
     resume_from: str | None = None
 
 
@@ -139,7 +140,9 @@ def train(cfg: TrainConfig) -> None:
     # Compile after loading weights (torch.compile wraps the module; HF
     # weight-load must target the raw module).
     if cfg.compile and device == "cuda":
-        model = torch.compile(model)  # type: ignore[assignment]
+        mode = getattr(cfg, "compile_mode", "default")
+        model = torch.compile(model, mode=mode) if mode != "default" else torch.compile(model)  # type: ignore[assignment]
+        print(f"torch.compile mode: {mode}")
 
     run_dir, log = _init_run(cfg)
     amp_dtype = autocast_dtype()
@@ -166,18 +169,25 @@ def train(cfg: TrainConfig) -> None:
         set_lr(optimizer, lr)
 
         optimizer.zero_grad(set_to_none=True)
-        loss_accum = 0.0
+        # Accumulate loss on-device as a tensor; .item() once per outer step,
+        # not once per microbatch. Avoids `grad_accum` GPU→CPU syncs per step.
+        loss_accum_t = torch.zeros((), device=device)
         for _ in range(cfg.grad_accum):
             x, y = train_loader.next_batch(rng, device)
+            if cfg.compile and cfg.compile_mode == "reduce-overhead":
+                # CUDA graphs need an explicit step boundary per microbatch
+                # when tied embeddings create cross-step aliasing.
+                torch.compiler.cudagraph_mark_step_begin()
             with torch.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=amp_dtype):
                 _, loss = model(x, y)
             loss = loss / cfg.grad_accum
             loss.backward()
-            loss_accum += loss.item()
+            loss_accum_t += loss.detach()
 
         if cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         optimizer.step()
+        loss_accum = loss_accum_t.item()  # single sync per step, only needed for logging
 
         if (step + 1) % cfg.log_every == 0 or step == start_step:
             now = time.monotonic()
