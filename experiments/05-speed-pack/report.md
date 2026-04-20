@@ -74,6 +74,31 @@ Nothing else changes: same optimizer, same schedule, same data, same token budge
   - attention QKV proj: `3·768·768 = 1.77 M` → `(12+4+4)·64·768 = 0.98 M` per layer (−790 k/layer × 12 = **−9.5 M params total**)
   - new total: ~114 M (down from 123.6 M). Comparable to the v0.2 → v0.3 drift from removing `wpe`.
 
+### Liger fused CE dropped from the bundle
+
+Smoke with the full bundle (including Liger) crashed inside
+`torch._dynamo` at compile time with `CUDA error: misaligned address`.
+Running Liger + compile is a known SM_120 interaction issue. Options
+considered:
+
+1. Keep Liger + turn compile off → **82 k tok/s** (net regression; rejects the experiment).
+2. Keep Liger + compile + debug the alignment issue → open-ended timesink.
+3. **Drop Liger; keep compile + max-autotune + GQA + softcap-off.**
+
+The smoke of option 3 is **204 – 208 k tok/s** on the real data —
+already +15 – 17 % vs v0.3's 178 k, clearing the +10 % accept bar from
+the other three changes alone. So the final bundle on the full run is
+three changes, not four. The `use_liger_fused_ce` flag and test coverage
+stay in the codebase for future non-compiled use or a torch upgrade
+that fixes the interaction.
+
+Updated expected contributions (from smoke isolation):
+- max-autotune: **+6 %** (measured in perf-util-probe)
+- GQA + softcap-off, combined: **~+9 – 11 %**
+  (larger than predicted GQA alone; candidate cause: the smaller
+  packed QKV projection also reduces memory-bound traffic, which
+  matters more on 5090 than tensor-core savings)
+
 ## Result
 
 (To be filled in after training completes.)
