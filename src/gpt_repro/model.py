@@ -52,8 +52,44 @@ class GPTConfig:
     u_net_skips: bool = False              # second half of layers receive skip from first half
     logit_softcap: float | None = None     # if set, logits go through s*tanh(x/s)
 
+    # --- FP8 matmul (requires transformer-engine[pytorch]) -------------------
+    use_fp8: bool = False                  # swap hidden-state nn.Linear → te.Linear + fp8_autocast
+    fp8_recipe: str = "delayed_hybrid"     # only 'delayed_hybrid' currently supported on SM_120
+    fp8_amax_history_len: int = 16
+    fp8_amax_compute_algo: str = "max"
+
 
 _VALID_BACKENDS = {"sdpa_cudnn", "sdpa_flash", "sdpa_math", "sdpa_efficient", "flash_attn_2"}
+
+
+# --- FP8 helpers ----------------------------------------------------------
+
+
+def _make_fp8_recipe(cfg: "GPTConfig"):
+    """Build a TransformerEngine FP8 recipe for the config."""
+    from transformer_engine.common.recipe import DelayedScaling, Format
+
+    if cfg.fp8_recipe == "delayed_hybrid":
+        return DelayedScaling(
+            fp8_format=Format.HYBRID,
+            amax_history_len=cfg.fp8_amax_history_len,
+            amax_compute_algo=cfg.fp8_amax_compute_algo,
+        )
+    raise ValueError(f"Unknown fp8_recipe: {cfg.fp8_recipe!r}")
+
+
+def make_linear(in_features: int, out_features: int, *, bias: bool, use_fp8: bool) -> nn.Module:
+    """Return `te.Linear` when `use_fp8=True`, else `nn.Linear`.
+
+    `te.Linear` exposes `.weight` and `.bias` as regular nn.Parameters, so
+    parameter-group building, init, and state-dict I/O in the rest of the
+    codebase just work.
+    """
+    if use_fp8:
+        import transformer_engine.pytorch as te
+
+        return te.Linear(in_features, out_features, bias=bias)
+    return nn.Linear(in_features, out_features, bias=bias)
 
 
 def select_sdpa_backend_globally(name: str) -> None:
@@ -139,8 +175,8 @@ class CausalSelfAttention(nn.Module):
         self.n_head = cfg.n_head
         self.n_embd = cfg.n_embd
         self.head_dim = cfg.n_embd // cfg.n_head
-        self.c_attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias)
-        self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        self.c_attn = make_linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias, use_fp8=cfg.use_fp8)
+        self.c_proj = make_linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias, use_fp8=cfg.use_fp8)
         self.dropout = cfg.dropout
         self.use_flash_attn_2 = cfg.attention_backend == "flash_attn_2"
         self.use_rope = cfg.positional_encoding == "rope"
@@ -196,8 +232,8 @@ class GELUMLP(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         hidden = cfg.mlp_hidden or (4 * cfg.n_embd)
-        self.c_fc = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
-        self.c_proj = nn.Linear(hidden, cfg.n_embd, bias=cfg.bias)
+        self.c_fc = make_linear(cfg.n_embd, hidden, bias=cfg.bias, use_fp8=cfg.use_fp8)
+        self.c_proj = make_linear(hidden, cfg.n_embd, bias=cfg.bias, use_fp8=cfg.use_fp8)
         self.dropout = nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -215,8 +251,8 @@ class ReLU2MLP(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         hidden = cfg.mlp_hidden or (4 * cfg.n_embd)
-        self.c_fc = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
-        self.c_proj = nn.Linear(hidden, cfg.n_embd, bias=cfg.bias)
+        self.c_fc = make_linear(cfg.n_embd, hidden, bias=cfg.bias, use_fp8=cfg.use_fp8)
+        self.c_proj = make_linear(hidden, cfg.n_embd, bias=cfg.bias, use_fp8=cfg.use_fp8)
         self.dropout = nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -236,9 +272,9 @@ class SwiGLU(nn.Module):
         super().__init__()
         hidden = cfg.mlp_hidden
         assert hidden is not None, "SwiGLU requires explicit mlp_hidden"
-        self.w_gate = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
-        self.w_up = nn.Linear(cfg.n_embd, hidden, bias=cfg.bias)
-        self.w_down = nn.Linear(hidden, cfg.n_embd, bias=cfg.bias)
+        self.w_gate = make_linear(cfg.n_embd, hidden, bias=cfg.bias, use_fp8=cfg.use_fp8)
+        self.w_up = make_linear(cfg.n_embd, hidden, bias=cfg.bias, use_fp8=cfg.use_fp8)
+        self.w_down = make_linear(hidden, cfg.n_embd, bias=cfg.bias, use_fp8=cfg.use_fp8)
         self.dropout = nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -311,6 +347,9 @@ class GPT(nn.Module):
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
 
+        # FP8 recipe (constructed once if use_fp8 is on, reused per forward).
+        self._fp8_recipe = _make_fp8_recipe(cfg) if cfg.use_fp8 else None
+
         self.apply(self._init_weights)
         # Out-projection init:
         # - default: N(0, 0.02 / sqrt(2 * n_layer))  (Radford et al. 2019 scaling)
@@ -327,9 +366,18 @@ class GPT(nn.Module):
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
-        if isinstance(module, nn.Linear):
+        # Cover nn.Linear and te.Linear. `te.Linear` is NOT an nn.Linear
+        # subclass, but exposes .weight / .bias with the same semantics.
+        is_linear_like = isinstance(module, nn.Linear) or (
+            hasattr(module, "weight")
+            and hasattr(module, "bias")
+            and getattr(module, "weight", None) is not None
+            and getattr(module.weight, "ndim", 0) == 2
+            and module.__class__.__module__.startswith("transformer_engine")
+        )
+        if is_linear_like:
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
+            if getattr(module, "bias", None) is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -367,22 +415,34 @@ class GPT(nn.Module):
             cos = sin = None
 
         blocks = self.transformer.h
-        if self.cfg.u_net_skips:
-            # U-Net style cross-depth shortcuts: layer i ≥ n/2 adds the
-            # post-block output of layer n-1-i to its input. First half
-            # pushes onto a LIFO, second half pops. Matches modded-nanogpt.
-            n = len(blocks)
-            half = n // 2
-            skip_stack: list[torch.Tensor] = []
-            for i, block in enumerate(blocks):
-                if i >= half:
-                    x = x + skip_stack.pop()
-                x = block(x, cos=cos, sin=sin)
-                if i < half:
-                    skip_stack.append(x)
+
+        def _run_blocks(x_in: torch.Tensor) -> torch.Tensor:
+            if self.cfg.u_net_skips:
+                # U-Net style cross-depth shortcuts: layer i ≥ n/2 adds the
+                # post-block output of layer n-1-i to its input. First half
+                # pushes onto a LIFO, second half pops. Matches modded-nanogpt.
+                n = len(blocks)
+                half = n // 2
+                skip_stack: list[torch.Tensor] = []
+                for i, block in enumerate(blocks):
+                    if i >= half:
+                        x_in = x_in + skip_stack.pop()
+                    x_in = block(x_in, cos=cos, sin=sin)
+                    if i < half:
+                        skip_stack.append(x_in)
+            else:
+                for block in blocks:
+                    x_in = block(x_in, cos=cos, sin=sin)
+            return x_in
+
+        if self.cfg.use_fp8:
+            import transformer_engine.pytorch as te
+
+            with te.fp8_autocast(enabled=True, fp8_recipe=self._fp8_recipe):
+                x = _run_blocks(x)
         else:
-            for block in blocks:
-                x = block(x, cos=cos, sin=sin)
+            x = _run_blocks(x)
+
         x = self.transformer.ln_f(x)
 
         if targets is None:
