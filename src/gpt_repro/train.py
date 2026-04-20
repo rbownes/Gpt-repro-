@@ -75,7 +75,7 @@ class TrainConfig:
     run_dir: str = "runs/baseline"
     seed: int = 0
     compile: bool = True
-    compile_mode: str = "default"   # "default" | "reduce-overhead" | "max-autotune"
+    compile_mode: str = "default"   # "default" | "reduce-overhead" | "max-autotune" | "max-autotune-no-cudagraphs"
     resume_from: str | None = None
 
 

@@ -69,6 +69,10 @@ class GPTConfig:
     # same module, so the skip pattern is degenerate).
     weight_tied: bool = False
 
+    # --- Speed-pack flags (exp/05) ------------------------------------------
+    n_kv_head: int | None = None           # None = n_head (MHA). <n_head enables GQA via SDPA.
+    use_liger_fused_ce: bool = False       # use Liger fused (linear + cross-entropy) on training path
+
 
 _VALID_BACKENDS = {"sdpa_cudnn", "sdpa_flash", "sdpa_math", "sdpa_efficient", "flash_attn_2"}
 
@@ -154,14 +158,21 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert cfg.n_embd % cfg.n_head == 0
         self.n_head = cfg.n_head
+        self.n_kv_head = cfg.n_kv_head if cfg.n_kv_head is not None else cfg.n_head
+        assert cfg.n_head % self.n_kv_head == 0, "n_head must be a multiple of n_kv_head"
         self.n_embd = cfg.n_embd
         self.head_dim = cfg.n_embd // cfg.n_head
-        self.c_attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias)
+        self.q_dim = cfg.n_head * self.head_dim
+        self.kv_dim = self.n_kv_head * self.head_dim
+        # Packed QKV projection. At MHA (n_kv_head == n_head) this equals the
+        # faithful 3*n_embd shape so HF weight-load continues to work.
+        self.c_attn = nn.Linear(cfg.n_embd, self.q_dim + 2 * self.kv_dim, bias=cfg.bias)
         self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
         self.dropout = cfg.dropout
         self.use_flash_attn_2 = cfg.attention_backend == "flash_attn_2"
         self.use_rope = cfg.positional_encoding == "rope"
         self.use_qk_norm = cfg.qk_norm
+        self.enable_gqa = self.n_kv_head < self.n_head
         if cfg.qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
@@ -172,11 +183,12 @@ class CausalSelfAttention(nn.Module):
         cos: torch.Tensor | None = None,
         sin: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, T, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        B, T, _C = x.size()
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split([self.q_dim, self.kv_dim, self.kv_dim], dim=2)
         q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
 
         if self.use_qk_norm:
             q = self.q_norm(q)
@@ -189,18 +201,20 @@ class CausalSelfAttention(nn.Module):
         if self.use_flash_attn_2:
             from flash_attn import flash_attn_func  # type: ignore
 
+            # flash-attn supports GQA by accepting different H dims on q vs kv.
             y = flash_attn_func(
                 q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
                 dropout_p=self.dropout if self.training else 0.0,
                 causal=True,
             ).transpose(1, 2)
         else:
-            y = F.scaled_dot_product_attention(
-                q, k, v,
-                is_causal=True,
-                dropout_p=self.dropout if self.training else 0.0,
-            )
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+            # torch >= 2.5 supports enable_gqa on SDPA. Pass only when
+            # n_kv_head < n_head so the MHA fast path is unchanged.
+            sdpa_kwargs = {"is_causal": True, "dropout_p": self.dropout if self.training else 0.0}
+            if self.enable_gqa:
+                sdpa_kwargs["enable_gqa"] = True
+            y = F.scaled_dot_product_attention(q, k, v, **sdpa_kwargs)
+        y = y.transpose(1, 2).contiguous().view(B, T, self.q_dim)
         return self.c_proj(y)
 
 
@@ -419,6 +433,11 @@ class Block(nn.Module):
 class GPT(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
+        if cfg.use_liger_fused_ce and cfg.logit_softcap is not None:
+            raise ValueError(
+                "Liger fused CE materialises no logits, so `logit_softcap` cannot "
+                "be applied simultaneously. Set one or the other, not both."
+            )
         self.cfg = cfg
         self.use_rope = cfg.positional_encoding == "rope"
 
@@ -448,6 +467,13 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         if cfg.tie_embeddings:
             self.lm_head.weight = self.transformer.wte.weight
+
+        if cfg.use_liger_fused_ce:
+            from liger_kernel.transformers.fused_linear_cross_entropy import (
+                LigerFusedLinearCrossEntropyLoss,
+            )
+
+            self._liger_ce = LigerFusedLinearCrossEntropyLoss(ignore_index=-1)
 
         if self.use_rope:
             # Under MLA the RoPE-rotated chunk is `mla_d_qk_rope` wide, not
@@ -545,6 +571,17 @@ class GPT(nn.Module):
         if targets is None:
             logits = self._maybe_softcap(self.lm_head(x[:, [-1], :]))
             return logits, None
+
+        if self.cfg.use_liger_fused_ce:
+            # Fused (matmul + softmax + NLL) — never materialises the full
+            # [B*T, V] logits tensor. Returns loss only; logits are None
+            # on the training path.
+            loss = self._liger_ce(
+                self.lm_head.weight,
+                x.reshape(-1, x.size(-1)),
+                targets.reshape(-1),
+            )
+            return None, loss
 
         logits = self._maybe_softcap(self.lm_head(x))
         loss = F.cross_entropy(
