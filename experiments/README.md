@@ -37,7 +37,7 @@ plan for the full rationale and references.
 | 01 | Block modernization: RoPE + RMSNorm + SwiGLU + QK-Norm | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | **accepted** (val 2.988, HellaSwag 38.3 %, 182 k tok/s, 15 h 20 min) |
 | 02 | AdamW → Muon on hidden matmuls | [Muon blog](https://kellerjordan.github.io/posts/muon/) | **rejected** (val Δ −0.0007 @ 10 B; time-to-target 14–25 % faster; tok/s −0.7 %) |
 | 03 | Full modded-nanogpt recipe (ReLU², zero-init, U-Net skips, logit softcap) | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | **accepted** (val 2.964, HellaSwag 37.8 %, 178 k tok/s, 15 h 39 min) |
-| 04 | FP8 matmul via TransformerEngine | [TE](https://github.com/NVIDIA/TransformerEngine) | pending |
+| 04 | FP8 matmul via TransformerEngine | [TE](https://github.com/NVIDIA/TransformerEngine) | **rejected** from smoke data — TE Python overhead + no MXFP8 on SM_120 makes FP8 **−13 %** tok/s vs BF16 on this hardware/scale |
 | 05 | μP / μTransfer HP sweep on 20 M proxy | [mup](https://github.com/microsoft/mup) | pending |
 | 06 | GQA (4 KV heads) | Llama-2 | pending |
 | 07 | `flash-attn==2.8.0.post2` opt-in backend (calibration) | [FA #2016](https://github.com/Dao-AILab/flash-attention/issues/2016) | pending |
@@ -56,3 +56,4 @@ plan for the full rationale and references.
 | 01-modern-block | RoPE + RMSNorm + SwiGLU + QK-Norm | accepted | **2.988** (Δ −0.052) | 182 k (−4.4 %) | accept; HellaSwag +1.5 pp; tagged `v0.2-exp01` |
 | 02-muon | AdamW → Muon (hidden matmuls) | rejected | 2.988 (Δ −0.0007) | 180 k (−0.7 %) | reject on val-loss axis; time-to-val-3.1 −14 %; null-result preserved |
 | 03-modded-tricks | ReLU² + zero-init + U-Net skips + logit softcap | accepted | **2.964** (Δ −0.024) | 178 k (−1.9 %) | accept; HellaSwag −0.5 pp (within noise); tagged `v0.3-exp03` |
+| 04-fp8 | FP8 via TransformerEngine | rejected | not measured | **152 k (−13 %)** | reject from smoke; TE per-call overhead + no MXFP8 on SM_120; kept behind flag for ≥ 350 M scale |

@@ -1,8 +1,8 @@
 ---
 id: 04-fp8
-status: in-progress
+status: rejected
 baseline_run: runs/03-modded-tricks/
-experiment_run: runs/04-fp8/
+experiment_run: runs/04-fp8-smoke/ (no full run; rejected from smoke data alone)
 baseline_tag: v0.3-exp03
 date: 2026-04-20
 author: rjbownes
@@ -128,19 +128,84 @@ experiment adds ~10 %. A full-matmul FP8 on our 124 M should land in the
   `apply(_init_weights)` override still sets every linear to N(0, 0.02),
   and the residual-scale / zero-init passes still catch `c_proj.weight`.
 
-## Result
+## Result — from smoke (no full run, see verdict)
 
-(To be filled in after training completes.)
+All smoke runs: same v0.3-modernplus arch, 15 steps after compile warmup,
+real FineWeb-Edu data, only `use_fp8` and `compile_mode` varying.
 
-| metric                          | baseline (v0.3) | exp/04 | Δ |
-|---------------------------------|---------------:|-------:|---:|
-| val loss @ 1 B tokens           | 3.4729         |        |   |
-| val loss @ 5 B tokens           | 3.0780         |        |   |
-| val loss @ 10 B tokens          | 2.9641         |        |   |
-| tokens / s median               | 178 215        |        |   |
-| wall-clock 1 epoch              | 15 h 39 min    |        |   |
-| HellaSwag acc (1 000 examples)  | 0.3780         |        |   |
+| config | steady-state tok/s | Δ vs BF16 default |
+|---|---:|---:|
+| BF16 + `compile="default"` (= v0.3 path) | **174 k** | — |
+| **FP8** + `compile="default"` | 152 k | **−13 %** |
+| FP8 + `compile_mode="max-autotune-no-cudagraphs"` | 152 k | −13 % |
+| FP8 + `compile=False` | 94 k | −46 % |
+
+FP8's loss curve in the smoke run tracks BF16 closely (steps 1-15 both
+drop from ~14.2 → ~9.6), so there's no evidence of FP8 hurting
+convergence at this scale. But because the **primary accept criterion is
+tokens/s ≥ 214 k (+20 %)** and all FP8 variants land at 152 k (−13 %),
+running the full 15 h at negative throughput would only confirm a loss
+number on a slower run — not worth the wall-clock.
+
+## Why FP8 loses on this hardware/scale
+
+Three compounding reasons, none of which are fixable with a config flag:
+
+1. **TE per-call Python overhead dominates.** 4 linears × 12 layers ×
+   32 grad-accum microbatches = **1 536 `te.Linear.forward` calls per
+   optimiser step**. Each does FP8 quant/dequant, amax history update,
+   and Python-level bookkeeping. At d = 768 / hidden = 3 072 the GEMMs
+   themselves are small enough that the bookkeeping cost per call is
+   comparable to the GEMM cost. At 7 B+ the GEMMs are ~60× bigger but
+   the overhead is constant, so large models see the expected win.
+
+2. **`te.fp8_autocast` is a compile-graph boundary.** The context
+   manager lives in Python and breaks `torch.compile`'s inductor traces
+   across the `fp8_autocast` call. We lose BF16's fusion benefits
+   (element-wise ops folded into neighbouring GEMMs) without fully
+   recovering them with FP8-native fusion. This is why
+   `max-autotune-no-cudagraphs` — which got us +6 % on BF16 (see
+   `experiments/perf-util-probe.md`) — gives nothing on FP8.
+
+3. **SM_120 FP8 tensor-core path is worse than SM_100.** MXFP8 block
+   scaling is the recipe that produces the big wins on H200/B200
+   (SM_100). TE 2.13 explicitly rejects it on SM_120 with
+   `AssertionError: MXFP8 (for all gemm layouts) is not supported on
+   12.0+ architectures yet`. Consumer Blackwell gets DelayedScaling
+   only, which on H-series is already slower than MXFP8. On
+   SM_120 the raw FP8 GEMM throughput advantage over BF16 is smaller
+   than the datasheet suggests once you actually plumb it through TE.
 
 ## Verdict
 
-(Pending.)
+**Reject.** Pre-declared primary criterion was tokens/s ≥ 214 k (+20 %).
+Measured: 152 k (−13 %). Secondary criterion (val loss within ±0.015)
+was not evaluated because the throughput regression alone makes the
+full run a waste of GPU time — 15 hours of training to confirm a slower
+path is slower. Loss curves in the smoke match BF16, so there's no
+evidence FP8 broke convergence; the change simply doesn't help.
+
+### What's preserved, and why
+
+- `src/gpt_repro/model.py` keeps the `use_fp8`, `fp8_recipe`, and
+  `make_linear` helpers. All disabled by default.
+- `configs/gpt2_124m_fp8.py` preserved — flips one flag on top of v0.3.
+- `tests/test_fp8.py` — 4 FP8-specific tests (shape, argmax agreement,
+  backward finite, te.Linear is the right class). All pass.
+- The `[fp8]` pyproject extra stays — needed for TE's NCCL-linked build,
+  and the install instructions in the v0.3 README now cover the
+  `--no-build-isolation` step.
+
+### Follow-up candidates, in order of expected payoff
+
+1. **Revisit at 350 M or 1.5 B scale.** Same code path; larger matmuls
+   should close the TE-overhead gap. If we ever do the 350 M rung, FP8
+   is the first throughput knob to pull before anything else.
+2. **Try `torchao`'s `float8_dynamic_quant` path** (now merged). Gives
+   a PyTorch-native FP8 without TE's per-call Python overhead. Would be
+   exp/04b if we want to chase throughput more.
+3. **Wait for TE SM_120 MXFP8 support.** Tracked in TE repo; when
+   available, retry this experiment verbatim.
+
+No new `v0.x` tag. `v0.3-exp03` remains the live baseline; exp/05
+branches from there.
