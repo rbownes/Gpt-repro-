@@ -1,10 +1,10 @@
 ---
 id: 03-modded-tricks
-status: in-progress
+status: accepted
 baseline_run: runs/01-modern-block/
 experiment_run: runs/03-modded-tricks/
 baseline_tag: v0.2-exp01
-date: 2026-04-19
+date: 2026-04-20
 author: rjbownes
 seeds: [0]
 ---
@@ -138,17 +138,64 @@ needle by more than 0.01 – 0.02 val loss; together I expect
 
 ## Result
 
-(To be filled in after training completes.)
-
 | metric                          | baseline (v0.2) | exp/03 | Δ |
 |---------------------------------|---------------:|-------:|---:|
-| val loss @ 1 B tokens           | 3.4641         |        |   |
-| val loss @ 5 B tokens           | 3.1009         |        |   |
-| val loss @ 10 B tokens          | 2.9884         |        |   |
-| tokens / s median               | 181 732        |        |   |
-| wall-clock 1 epoch              | 15 h 20 min    |        |   |
-| HellaSwag acc (1 000 examples)  | 0.3830         |        |   |
+| val loss @ 1 B tokens           | 3.4641         | 3.4729   | +0.009 (early slowdown from zero-init) |
+| val loss @ 5 B tokens           | 3.1009         | **3.0780** | **−0.023** |
+| val loss @ 10 B tokens (best)   | 2.9884         | **2.9641** | **−0.024** |
+| val loss (200-batch held-out)   | 2.9946         | **2.9694** | **−0.025** |
+| HellaSwag acc (1 000 examples)  | 0.3830         | 0.3780   | −0.5 pp (outside predicted range) |
+| tokens / s median               | 181 732        | 178 215  | **−1.9 %** |
+| tokens / s mean                 | 181 240        | 177 594  | −2.0 % |
+| wall-clock 1 epoch              | 15 h 20 min    | 15 h 39 min | +19 min |
+| time to val loss 3.5            | 96.6 min       | 98.4 min | +2 min   (tie) |
+| time to val loss 3.2            | 290 min        | **270 min**  | **−7 %** |
+| time to val loss 3.10           | 483 min        | **418 min**  | **−13 %** |
+| time to val loss 3.00           | 883 min (≈final) | **713 min**  | **−19 %** |
+| time to val loss ≈ 2.988 (v0.2's final) | N/A | **762 min** | reaches v0.2 quality in **83 %** of v0.2 wall-clock |
+
+### Predicted vs actual
+
+- Predicted val loss Δ: **−0.02 to −0.05** (point **−0.03**). Actual: **−0.024**. In range, below the point prediction. ✅
+- Predicted tok/s Δ: **−3 % to +2 %**. Actual: **−1.9 %**. In range. ✅
+- Predicted HellaSwag Δ: **+0.0 to +1.5 pp**. Actual: **−0.5 pp**. **Miss** — slight regression rather than the small gain I expected. Still within the ~1.5 pp noise floor of a 1 000-sample eval, but I wouldn't paper over it: the bundle trades a tiny bit of HellaSwag multiple-choice skill for val-loss improvement. Candidate culprit: logit softcap at `s=30` compresses the spread of log-probs, which could make per-choice log-likelihoods closer together and dampen the confidence signal the metric relies on. An ablation (softcap vs no softcap) would tell us for sure; leaving that to follow-up.
+
+### Loss-curve shape
+
+Zero-init projections cost ~0.2 val loss at step 500 (4.77 vs 4.59 for v0.2)
+because the residual stream is literally the token embedding for the first
+few hundred steps — every block is initially a no-op. By step 2 500 exp/03
+has caught up; by step 3 000 it's ahead; the gap holds steady at **−0.02**
+for the rest of training. Consistent with "zero-init buys a cleaner
+optimisation path that pays off by mid-training and keeps paying".
 
 ## Verdict
 
-(Pending.)
+**Accept.** Both primary pre-declared criteria clear:
+
+- val loss @ 10 B Δ: **−0.024** (required ≥ −0.02) ✅
+- tok/s regression: **1.9 %** (required ≤ 5 %) ✅
+- no training instability; smooth cosine decay; zero NaN / spike events.
+- HellaSwag: −0.5 pp (secondary, just below the pre-declared range, within noise).
+
+**Advance `v0.3-exp03` tag** at this commit. Future experiments fork from
+**`v0.3-exp03`** and treat modern block + modded tricks as the new baseline.
+
+Configs preserved at `configs/gpt2_124m.py` (faithful),
+`configs/gpt2_124m_modern.py` (v0.2), and
+`configs/gpt2_124m_modernplus.py` (v0.3). All three remain valid, run-to-completion
+recipes; new experiments fork the last one.
+
+### Follow-up candidates
+
+- **Ablate the logit softcap.** If it's responsible for the HellaSwag dip,
+  dropping it gives free HellaSwag accuracy at no loss cost.
+- **Revisit Muon on top of v0.3** (exp/04). Exp/02 rejected Muon on top of
+  v0.2 because AdamW caught up by 10 B tokens. On top of v0.3, zero-init +
+  U-Net skips may change the optimisation landscape enough that Muon's
+  orthogonal updates carry further — worth re-running.
+- **FP8 matmul via TransformerEngine (roadmap #04)** is now the most valuable
+  single-axis experiment for tok/s; v0.3 gave +2.4 % combined modern-block
+  quality at −2 % tok/s, and an FP8 boost could put throughput back above
+  the original faithful baseline.
+

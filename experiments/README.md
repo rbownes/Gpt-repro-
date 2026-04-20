@@ -35,8 +35,8 @@ plan for the full rationale and references.
 |---|---|---|---|
 | 00 | Faithful GPT-2 124M on FineWeb-Edu-10B | — | **accepted** (val 3.040, HellaSwag 36.8 %, 190 k tok/s, 14 h 41 min) |
 | 01 | Block modernization: RoPE + RMSNorm + SwiGLU + QK-Norm | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | **accepted** (val 2.988, HellaSwag 38.3 %, 182 k tok/s, 15 h 20 min) |
-| 02 | AdamW → Muon on hidden matmuls | [Muon blog](https://kellerjordan.github.io/posts/muon/) | pending |
-| 03 | Full modded-nanogpt recipe (ReLU², zero-init, embed-skip, logit softcap) | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | pending |
+| 02 | AdamW → Muon on hidden matmuls | [Muon blog](https://kellerjordan.github.io/posts/muon/) | **rejected** (val Δ −0.0007 @ 10 B; time-to-target 14–25 % faster; tok/s −0.7 %) |
+| 03 | Full modded-nanogpt recipe (ReLU², zero-init, U-Net skips, logit softcap) | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | **accepted** (val 2.964, HellaSwag 37.8 %, 178 k tok/s, 15 h 39 min) |
 | 04 | FP8 matmul via TransformerEngine | [TE](https://github.com/NVIDIA/TransformerEngine) | pending |
 | 05 | μP / μTransfer HP sweep on 20 M proxy | [mup](https://github.com/microsoft/mup) | pending |
 | 06 | GQA (4 KV heads) | Llama-2 | pending |
@@ -54,3 +54,5 @@ plan for the full rationale and references.
 |---|---|---|---|---|---|
 | 00-baseline | Faithful 124M on FW-Edu-10B | accepted | **3.040** | 190 k | reference run; tagged `v0.1-baseline` @ `626509c` |
 | 01-modern-block | RoPE + RMSNorm + SwiGLU + QK-Norm | accepted | **2.988** (Δ −0.052) | 182 k (−4.4 %) | accept; HellaSwag +1.5 pp; tagged `v0.2-exp01` |
+| 02-muon | AdamW → Muon (hidden matmuls) | rejected | 2.988 (Δ −0.0007) | 180 k (−0.7 %) | reject on val-loss axis; time-to-val-3.1 −14 %; null-result preserved |
+| 03-modded-tricks | ReLU² + zero-init + U-Net skips + logit softcap | accepted | **2.964** (Δ −0.024) | 178 k (−1.9 %) | accept; HellaSwag −0.5 pp (within noise); tagged `v0.3-exp03` |
