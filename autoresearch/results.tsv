@@ -16,3 +16,4 @@ eadb455	1.836419	194328.1	14265.6	discard	WARMUP_FRAC 0.02 -> 0.01 (shorter warm
 b98b7ef	1.879694	193655.9	14265.6	discard	pre-compile warmup step before TIME_BUDGET: +0.074 bpb. Compile is disk-cached so warmup=1s; the step ran at PEAK_LR before LR-warmup, destabilising init.
 d8f3884	1.798705	195162.8	14265.6	keep	PEAK_LR 6e-4 -> 5e-4 (constant LR regime): -0.007 bpb. Constant LR lifts average LR so peak is slightly too hot.
 8faa4c5	1.815274	195592.9	14265.6	discard	PEAK_LR 5e-4 -> 4e-4: +0.017 bpb. 5e-4 is near-optimum for constant-LR.
+46ae47c	1.811451	192467.6	14265.6	discard	BETA2 0.95 -> 0.98: +0.013 bpb. Longer variance EMA hurts short-budget training.
