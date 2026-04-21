@@ -45,3 +45,4 @@ d5af62f	1.300054	193390.7	14265.6	discard	PEAK_LR 6e-4 -> 8e-4: +0.006 bpb.
 7e915f7	1.297854	188516.3	14265.6	discard	BETA1 0.9 -> 0.85: +0.004 bpb.
 f49adda	1.291149	193121.3	14265.6	keep	WARMUP_FRAC 0.02 -> 0.04: -0.003 bpb. Higher PEAK_LR and BETA2=0.999 want longer warmup.
 9013440	1.293759	193220.6	14265.6	discard	WARMUP_FRAC 0.04 -> 0.08: +0.003 bpb.
+75ff801	1.290825	193312.5	14265.6	keep	PEAK_LR 6e-4 -> 7e-4: -0.0003 bpb (marginal).
