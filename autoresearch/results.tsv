@@ -19,3 +19,4 @@ d8f3884	1.798705	195162.8	14265.6	keep	PEAK_LR 6e-4 -> 5e-4 (constant LR regime)
 46ae47c	1.811451	192467.6	14265.6	discard	BETA2 0.95 -> 0.98: +0.013 bpb. Longer variance EMA hurts short-budget training.
 61ac55c	1.804890	191561.1	14265.6	discard	BETA2 0.95 -> 0.9: +0.006 bpb. 0.95 is optimum.
 ea67ddc	1.866457	192365.9	14265.6	discard	BETA1 0.9 -> 0.95: +0.068 bpb. Stronger momentum hurts short-budget training.
+6a31e29	0.000000	0.0	0.0	crash	COMPILE_MODE max-autotune (CUDA graphs): 'accessing tensor output of CUDAGraphs that has been overwritten' during backward — U-Net skips share wte output across blocks, incompatible with cudagraph output tracking even with mark_step_begin.
