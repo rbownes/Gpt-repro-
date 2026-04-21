@@ -66,7 +66,7 @@ WEIGHT_DECAY = 0.0
 BETA1 = 0.9
 BETA2 = 0.999
 EPS = 1e-8
-GRAD_CLIP = 1.0
+GRAD_CLIP = 0.5
 WARMUP_FRAC = 0.04            # fraction of budget spent warming LR up (~12 s @ 300 s)
 SEED = 0
 
