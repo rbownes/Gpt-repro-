@@ -3,3 +3,4 @@ commit	val_bpb	tok_per_sec	peak_vram_mb	status	description
 ef5e0de	1.928774	195831.6	14265.6	keep	Pinned-memory dataloader; async H2D copy via pre-allocated pinned buffers
 92f8405	1.975410	189238.7	26418.4	discard	micro_batch 16->32, grad_accum 32->16 — worse tok/s (VRAM pressure), fewer steps, +0.047 bpb
 846abaa	0.000000	0.0	0.0	crash	ATTENTION_BACKEND=flash_attn_2: requires pure bf16 Q/K, but RMSNorm weight mul promotes to fp32 under autocast. Would need RMSNorm dtype fix (FROZEN_ARCH-adjacent); skip.
+47c375f	1.930994	194387.3	14265.6	discard	torch.compile(fullgraph=True) — no fusion win at this arch (tok/s -0.7 %, bpb +0.002)
