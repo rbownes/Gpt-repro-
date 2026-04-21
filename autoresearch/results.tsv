@@ -41,3 +41,4 @@ f3bc741	1.322178	190543.5	14265.6	discard	ATTENTION_BACKEND sdpa_efficient: +0.0
 37705c0	1.297416	190953.9	14265.6	keep	BETA2 0.995 -> 0.999: -0.002 bpb. Classic Adam BETA2 wins at small batch.
 07f8454	1.294018	192099.2	14265.6	keep	PEAK_LR 5e-4 -> 6e-4 at BETA2=0.999: -0.003 bpb. Longer EMA allows higher LR.
 d5af62f	1.300054	193390.7	14265.6	discard	PEAK_LR 6e-4 -> 8e-4: +0.006 bpb.
+00aa47a	1.307999	193370.0	14265.6	discard	BETA1 0.9 -> 0.95 at batch=32: +0.014 bpb.
