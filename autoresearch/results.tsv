@@ -1,1 +1,2 @@
 commit	val_bpb	tok_per_sec	peak_vram_mb	status	description
+29abdcf	1.929713	193470.8	14265.6	baseline	Phase A baseline: v0.3-exp03 arch flattened, compile=max-autotune-no-cudagraphs, sdpa_flash, bs=16*32
