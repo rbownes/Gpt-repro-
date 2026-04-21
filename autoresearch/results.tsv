@@ -37,3 +37,4 @@ da80b5b	1.328649	192928.3	14265.6	discard	WARMUP_FRAC 0.02 -> 0.005: +0.010 bpb.
 a8070b9	1.319524	191478.6	14265.6	discard	MIN_LR_RATIO 1.0 -> 0.5 (batch=32): +0.001 bpb (noise).
 f3bc741	1.322178	190543.5	14265.6	discard	ATTENTION_BACKEND sdpa_efficient: +0.004 bpb, tok/s -1.416d5a8a	1.322780	193444.6	14265.6	discard	Check divergence every 50 steps: +0.005 bpb, +6 steps (0.35edef6a	1.304207	193253.9	14265.6	keep	BETA2 0.95 -> 0.98 at batch=32: -0.014 bpb. Noisier small-batch grads benefit from longer variance EMA.
 8c39ecf	1.301720	193151.9	14265.6	keep	BETA2 0.98 -> 0.99: -0.002 bpb. Even longer variance EMA helps small-batch.
+4c0d7af	1.299209	193217.0	14265.6	keep	BETA2 0.99 -> 0.995: -0.002 bpb.
