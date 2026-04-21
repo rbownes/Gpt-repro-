@@ -12,7 +12,8 @@ import torch
 
 from gpt_repro.data import DataConfig, ShardLoader
 from gpt_repro.model import GPT, GPTConfig, select_sdpa_backend_globally
-from gpt_repro.optim import build_optimizer, lr_at_step, set_lr
+from gpt_repro.mup import apply_mup, load_base_shapes, record_base_shapes
+from gpt_repro.optim import build_optimizer, lr_frac_at_step, set_lr_from_frac
 from gpt_repro.utils import (
     JSONLLogger,
     autocast_dtype,
@@ -51,6 +52,17 @@ class TrainConfig:
     beta2: float = 0.95
     eps: float = 1e-8
     grad_clip: float = 1.0
+
+    # Optimizer choice (defaults preserve faithful AdamW path)
+    optimizer: str = "adamw"        # "adamw" | "muon_adamw"
+    muon_lr: float = 0.02           # Muon base LR (nanochat default, per-shape scaled inside step)
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
+    muon_beta2: float = 0.9
+
+    # μP / μTransfer plumbing (off by default; no-op at base width)
+    use_mup: bool = False
+    mup_base_shapes_path: str | None = None   # None ⇒ self-base from this model (no-op)
 
     # Training loop
     eval_every: int = 500
@@ -110,6 +122,17 @@ def train(cfg: TrainConfig) -> None:
     model = GPT(model_cfg).to(device)
     print(f"model params: {sum(p.numel() for p in model.parameters()):,}")
 
+    # μP / μTransfer (no-op at base_width = target_width). Must run before
+    # the optimizer is built — `build_optimizer` reads `p.mup_width_mult`.
+    if cfg.use_mup:
+        if cfg.mup_base_shapes_path is None:
+            base_shapes = record_base_shapes(model)  # self-base → all width_mult = 1.0
+            print(f"μP: self-base ({len(base_shapes)} params); LR scaling is a no-op at base width")
+        else:
+            base_shapes = load_base_shapes(cfg.mup_base_shapes_path)
+            print(f"μP: loaded base_shapes from {cfg.mup_base_shapes_path} ({len(base_shapes)} params)")
+        apply_mup(model, base_shapes)
+
     # Data
     train_loader = ShardLoader(DataConfig(
         data_dir=cfg.data_dir, block_size=cfg.block_size,
@@ -121,14 +144,9 @@ def train(cfg: TrainConfig) -> None:
     ))
     print(f"train tokens: {train_loader.total_tokens:,} | val tokens: {val_loader.total_tokens:,}")
 
-    # Optimizer
-    optimizer = build_optimizer(
-        model,
-        lr=cfg.peak_lr,
-        weight_decay=cfg.weight_decay,
-        betas=(cfg.beta1, cfg.beta2),
-        eps=cfg.eps,
-    )
+    # Optimizer (dispatches on cfg.optimizer: "adamw" | "muon_adamw")
+    optimizer = build_optimizer(model, cfg)
+    print(f"optimizer: {cfg.optimizer} | param groups: {len(optimizer.param_groups)}")
 
     # Resume?
     start_step = 0
@@ -159,14 +177,16 @@ def train(cfg: TrainConfig) -> None:
     t_last_log = t_start
 
     for step in range(start_step, cfg.total_steps):
-        lr = lr_at_step(
+        # Schedule returns a multiplier; each param group scales its own `base_lr`.
+        # This lets Muon (base ≈ 0.02) and AdamW (base ≈ 6e-4) share one schedule.
+        frac = lr_frac_at_step(
             step,
-            peak_lr=cfg.peak_lr,
             warmup_steps=cfg.warmup_steps,
             total_steps=cfg.total_steps,
             min_lr_ratio=cfg.min_lr_ratio,
         )
-        set_lr(optimizer, lr)
+        set_lr_from_frac(optimizer, frac, fallback_lr=cfg.peak_lr)
+        lr = cfg.peak_lr * frac  # retained for logging
 
         optimizer.zero_grad(set_to_none=True)
         # Accumulate loss on-device as a tensor; .item() once per outer step,

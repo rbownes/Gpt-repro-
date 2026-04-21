@@ -518,3 +518,69 @@ def test_weight_tied_overfit_tiny_batch() -> None:
         opt.step()
         final = loss.item()
     assert final < 0.7, f"LoopLLM overfit failed: final loss {final:.4f}"
+
+
+# ---- MuonAdamW optimiser (exp/06) ------------------------------------------
+
+
+def test_muon_param_grouping_shapes() -> None:
+    """MuonAdamW groups all block 2-D matrices by shape; embeddings + 1-D → AdamW."""
+    from gpt_repro.optim import build_optimizer
+    from gpt_repro.train import TrainConfig
+
+    cfg = _modernplus_cfg()
+    model = GPT(cfg)
+    tcfg = TrainConfig(model=cfg, optimizer="muon_adamw")
+    opt = build_optimizer(model, tcfg)
+
+    adamw_groups = [g for g in opt.param_groups if g["kind"] == "adamw"]
+    muon_groups = [g for g in opt.param_groups if g["kind"] == "muon"]
+    assert len(adamw_groups) == 1, "expected exactly one AdamW group"
+    assert len(muon_groups) >= 1, "expected at least one Muon group"
+    # Every param in a Muon group shares that group's shape.
+    for g in muon_groups:
+        shape = tuple(g["params"][0].shape)
+        for p in g["params"]:
+            assert tuple(p.shape) == shape, f"Muon group shape mismatch: {tuple(p.shape)} vs {shape}"
+    # Every 2-D block matrix lands in exactly one Muon group.
+    muon_ids = {id(p) for g in muon_groups for p in g["params"]}
+    for name, p in model.named_parameters():
+        is_block_matrix = (
+            p.ndim == 2
+            and not name.startswith("transformer.wte")
+            and not name.startswith("transformer.wpe")
+            and not name.startswith("lm_head")
+        )
+        if is_block_matrix:
+            assert id(p) in muon_ids, f"{name} should be in a Muon group"
+
+
+def test_muon_adamw_overfit_tiny_batch() -> None:
+    """MuonAdamW must overfit a tiny batch in ~200 steps, same gate as AdamW."""
+    from gpt_repro.optim import build_optimizer, lr_frac_at_step, set_lr_from_frac
+    from gpt_repro.train import TrainConfig
+
+    torch.manual_seed(0)
+    cfg = _modernplus_cfg(block_size=32)
+    model = GPT(cfg)
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    # Small AdamW LR (embeddings) + default Muon LR 0.02 (block matrices).
+    tcfg = TrainConfig(
+        model=cfg, optimizer="muon_adamw",
+        peak_lr=3e-3,                  # AdamW group (embeddings) ≈ legacy overfit test
+        muon_lr=0.02,                  # nanochat default
+        warmup_steps=10,
+        total_steps=300,
+        min_lr_ratio=0.1,
+    )
+    opt = build_optimizer(model, tcfg)
+    final = float("nan")
+    for step in range(300):
+        frac = lr_frac_at_step(step, warmup_steps=10, total_steps=300, min_lr_ratio=0.1)
+        set_lr_from_frac(opt, frac, fallback_lr=3e-3)
+        opt.zero_grad()
+        _, loss = model(x, x)
+        loss.backward()
+        opt.step()
+        final = loss.item()
+    assert final < 0.5, f"MuonAdamW overfit failed: final {final:.4f}"
