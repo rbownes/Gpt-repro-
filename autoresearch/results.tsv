@@ -34,3 +34,4 @@ d895c65	1.336545	192620.7	14265.6	discard	MIN_LR_RATIO 1.0 -> 0.1: +0.017 bpb. C
 b73895f	1.323434	188111.9	14265.6	discard	EPS 1e-8 -> 1e-10: +0.005 bpb. Sharper Adam hurts slightly.
 61a4d35	1.319616	192883.0	14265.6	discard	GRAD_CLIP 1.0 -> 0.5: +0.001 bpb (noise).
 da80b5b	1.328649	192928.3	14265.6	discard	WARMUP_FRAC 0.02 -> 0.005: +0.010 bpb. Short warmup still hurts.
+a8070b9	1.319524	191478.6	14265.6	discard	MIN_LR_RATIO 1.0 -> 0.5 (batch=32): +0.001 bpb (noise).
