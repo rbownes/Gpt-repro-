@@ -11,3 +11,4 @@ d64f97d	1.980836	193274.8	14265.8	discard	PEAK_LR 6e-4 -> 9e-4: destabilised (bp
 fe0812b	1.839562	193270.9	14265.6	keep	MIN_LR_RATIO 0.3 -> 0.5: another -0.028 bpb. Keep pushing.
 df2bfbe	1.805346	193275.0	14265.6	keep	MIN_LR_RATIO 0.5 -> 1.0 (constant LR after warmup). -0.034 bpb. Short budget wants no cosine decay.
 08c26c6	2.013812	191709.4	14265.6	discard	GRAD_CLIP 1.0 -> 0.0: training destabilised (+0.21 bpb), negligible tok/s win. Keep clipping.
+e4e466b	1.828547	194816.6	14265.6	discard	PEAK_LR 6e-4 -> 7.5e-4 (constant LR): +0.023 bpb. 6e-4 is near-optimal for constant-LR.
