@@ -2,3 +2,4 @@ commit	val_bpb	tok_per_sec	peak_vram_mb	status	description
 29abdcf	1.929713	193470.8	14265.6	baseline	Phase A baseline: v0.3-exp03 arch flattened, compile=max-autotune-no-cudagraphs, sdpa_flash, bs=16*32
 ef5e0de	1.928774	195831.6	14265.6	keep	Pinned-memory dataloader; async H2D copy via pre-allocated pinned buffers
 92f8405	1.975410	189238.7	26418.4	discard	micro_batch 16->32, grad_accum 32->16 — worse tok/s (VRAM pressure), fewer steps, +0.047 bpb
+846abaa	0.000000	0.0	0.0	crash	ATTENTION_BACKEND=flash_attn_2: requires pure bf16 Q/K, but RMSNorm weight mul promotes to fp32 under autocast. Would need RMSNorm dtype fix (FROZEN_ARCH-adjacent); skip.
