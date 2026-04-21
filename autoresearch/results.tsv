@@ -31,3 +31,4 @@ d6beeda	1.344213	191876.8	14265.6	discard	PEAK_LR 5e-4 -> 3e-4 (batch=32): +0.02
 ad593f9	1.320834	188024.8	14265.6	discard	PEAK_LR 5e-4 -> 7e-4 (batch=32): +0.002 bpb (noise). 5e-4 still optimum.
 d895c65	1.336545	192620.7	14265.6	discard	MIN_LR_RATIO 1.0 -> 0.1: +0.017 bpb. Constant LR still wins even at 1752 steps.
 398d39b	1.324413	187587.3	25941.8	discard	MICRO_BATCH 16/GA 2 -> 32/GA 1: +0.005 bpb, tok/s -25459759	1.318277	193135.7	14265.6	keep	WEIGHT_DECAY 0.1 -> 0.0: -0.001 bpb (marginal, still under-fit at 1764 steps).
+b73895f	1.323434	188111.9	14265.6	discard	EPS 1e-8 -> 1e-10: +0.005 bpb. Sharper Adam hurts slightly.
