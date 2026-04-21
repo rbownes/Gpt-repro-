@@ -5,3 +5,4 @@ ef5e0de	1.928774	195831.6	14265.6	keep	Pinned-memory dataloader; async H2D copy 
 846abaa	0.000000	0.0	0.0	crash	ATTENTION_BACKEND=flash_attn_2: requires pure bf16 Q/K, but RMSNorm weight mul promotes to fp32 under autocast. Would need RMSNorm dtype fix (FROZEN_ARCH-adjacent); skip.
 47c375f	1.930994	194387.3	14265.6	discard	torch.compile(fullgraph=True) — no fusion win at this arch (tok/s -0.7 %, bpb +0.002)
 d64f97d	1.980836	193274.8	14265.8	discard	PEAK_LR 6e-4 -> 9e-4: destabilised (bpb +0.052). Stay at 6e-4.
+9897588	1.914312	189762.2	14265.6	keep	WARMUP_FRAC 0.04 -> 0.02: -0.014 bpb. Fixed-time regime needs less warmup.
