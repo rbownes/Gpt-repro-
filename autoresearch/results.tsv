@@ -23,3 +23,4 @@ ea67ddc	1.866457	192365.9	14265.6	discard	BETA1 0.9 -> 0.95: +0.068 bpb. Stronge
 d1a13b2	1.801245	196332.7	14265.6	discard	ATTENTION_BACKEND sdpa_cudnn: +0.003 bpb (within noise), +1k tok/s. Marginal speedup but not strictly better.
 e4cb358	1.801180	196275.0	14265.6	discard	WEIGHT_DECAY 0.1 -> 0.05: +0.002 bpb (within noise).
 d100f41	1.601939	191308.3	14265.8	keep	GRAD_ACCUM 32 -> 16 (effective batch 512 -> 256 seqs): -0.197 bpb. Doubled optimizer steps (219 vs 112) dominate small tok/s dip.
+e2f252d	1.466972	195366.4	14265.6	keep	GRAD_ACCUM 16 -> 8 (effective batch 256 -> 128 seqs): -0.135 bpb. 446 optim steps vs 219.
