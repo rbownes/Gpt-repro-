@@ -62,4 +62,6 @@ def make_config() -> TrainConfig:
         run_dir="runs/03-modded-tricks",
         seed=0,
         compile=True,
+        # Pin to "default" so v0.3-exp03 tagged tok/s numbers (178 k) stay reproducible.
+        compile_mode="default",
     )

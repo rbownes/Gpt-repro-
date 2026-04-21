@@ -63,7 +63,11 @@ class TrainConfig:
     run_dir: str = "runs/baseline"
     seed: int = 0
     compile: bool = True
-    compile_mode: str = "default"   # "default" | "max-autotune-no-cudagraphs" | ...
+    # Default opted up to "max-autotune-no-cudagraphs" after exp/05: measured
+    # +6 % tok/s (perf-util-probe.md) with identical loss math; zero risk free
+    # speed. Historical configs for v0.1 / v0.2 / v0.3 pin `compile_mode="default"`
+    # explicitly so their tagged tok/s numbers remain reproducible.
+    compile_mode: str = "max-autotune-no-cudagraphs"
     resume_from: str | None = None
 
 

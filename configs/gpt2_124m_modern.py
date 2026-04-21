@@ -51,4 +51,6 @@ def make_config() -> TrainConfig:
         run_dir="runs/01-modern-block",
         seed=0,
         compile=True,
+        # Pin to "default" so v0.2-exp01 tagged tok/s numbers (182 k) stay reproducible.
+        compile_mode="default",
     )

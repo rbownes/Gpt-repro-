@@ -39,4 +39,6 @@ def make_config() -> TrainConfig:
         run_dir="runs/baseline",
         seed=0,
         compile=True,
+        # Pin to "default" so v0.1-baseline tagged tok/s numbers (190 k) stay reproducible.
+        compile_mode="default",
     )
