@@ -24,3 +24,4 @@ d1a13b2	1.801245	196332.7	14265.6	discard	ATTENTION_BACKEND sdpa_cudnn: +0.003 b
 e4cb358	1.801180	196275.0	14265.6	discard	WEIGHT_DECAY 0.1 -> 0.05: +0.002 bpb (within noise).
 d100f41	1.601939	191308.3	14265.8	keep	GRAD_ACCUM 32 -> 16 (effective batch 512 -> 256 seqs): -0.197 bpb. Doubled optimizer steps (219 vs 112) dominate small tok/s dip.
 e2f252d	1.466972	195366.4	14265.6	keep	GRAD_ACCUM 16 -> 8 (effective batch 256 -> 128 seqs): -0.135 bpb. 446 optim steps vs 219.
+2e21c16	1.401887	194589.2	14265.6	keep	GRAD_ACCUM 8 -> 4 (effective batch 128 -> 64 seqs): -0.065 bpb. 889 optim steps.
