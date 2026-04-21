@@ -61,7 +61,7 @@ LOGIT_SOFTCAP = 30.0         # FROZEN_ARCH (v0.3); set None to disable
 MICRO_BATCH = 16
 GRAD_ACCUM = 32              # effective batch = MICRO_BATCH * GRAD_ACCUM * BLOCK_SIZE
 PEAK_LR = 6e-4
-MIN_LR_RATIO = 0.1
+MIN_LR_RATIO = 0.2
 WEIGHT_DECAY = 0.1
 BETA1 = 0.9
 BETA2 = 0.95
