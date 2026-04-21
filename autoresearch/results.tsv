@@ -8,3 +8,4 @@ d64f97d	1.980836	193274.8	14265.8	discard	PEAK_LR 6e-4 -> 9e-4: destabilised (bp
 9897588	1.914312	189762.2	14265.6	keep	WARMUP_FRAC 0.04 -> 0.02: -0.014 bpb. Fixed-time regime needs less warmup.
 87eefc3	1.887432	189487.9	14265.6	keep	MIN_LR_RATIO 0.1 -> 0.2: -0.027 bpb. Cosine tail was too deep for 300-s regime.
 79b5117	1.867861	194011.6	14265.6	keep	MIN_LR_RATIO 0.2 -> 0.3: another -0.020 bpb.
+fe0812b	1.839562	193270.9	14265.6	keep	MIN_LR_RATIO 0.3 -> 0.5: another -0.028 bpb. Keep pushing.
