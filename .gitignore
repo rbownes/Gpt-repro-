@@ -26,3 +26,7 @@ wandb/
 .idea/
 .vscode/
 *.swp
+
+# autoresearch transient artifacts
+autoresearch/run.log
+autoresearch/best_val.pt
