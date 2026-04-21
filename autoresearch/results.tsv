@@ -26,3 +26,4 @@ d100f41	1.601939	191308.3	14265.8	keep	GRAD_ACCUM 32 -> 16 (effective batch 512 
 e2f252d	1.466972	195366.4	14265.6	keep	GRAD_ACCUM 16 -> 8 (effective batch 256 -> 128 seqs): -0.135 bpb. 446 optim steps vs 219.
 2e21c16	1.401887	194589.2	14265.6	keep	GRAD_ACCUM 8 -> 4 (effective batch 128 -> 64 seqs): -0.065 bpb. 889 optim steps.
 f645048	1.319137	191778.3	14265.6	keep	GRAD_ACCUM 4 -> 2 (effective batch 64 -> 32 seqs): -0.083 bpb. 1752 optim steps.
+25215ef	1.332862	188022.4	13793.0	discard	GRAD_ACCUM 2 -> 1: +0.014 bpb. Gradient noise dominates at batch=16 seqs; 32 is the elbow.
