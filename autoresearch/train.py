@@ -59,7 +59,7 @@ LOGIT_SOFTCAP = 30.0         # FROZEN_ARCH (v0.3); set None to disable
 
 # ---- Training mechanics (speed knobs — agent MAY edit these) ---------------
 MICRO_BATCH = 16
-GRAD_ACCUM = 32              # effective batch = MICRO_BATCH * GRAD_ACCUM * BLOCK_SIZE
+GRAD_ACCUM = 16              # effective batch = MICRO_BATCH * GRAD_ACCUM * BLOCK_SIZE
 PEAK_LR = 5e-4
 MIN_LR_RATIO = 1.0
 WEIGHT_DECAY = 0.1
