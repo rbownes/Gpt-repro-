@@ -292,7 +292,12 @@ class GPT(nn.Module):
 
 
 class ShardLoader:
-    """Random-access loader over uint16 memmap shards (matches scripts/prepare_fineweb_edu.py)."""
+    """Random-access loader over uint16 memmap shards (matches scripts/prepare_fineweb_edu.py).
+
+    Uses a pre-allocated pinned-memory pair of (x, y) buffers so the H2D
+    copy via `.to(device, non_blocking=True)` is genuinely async and can
+    overlap with the previous batch's forward/backward.
+    """
 
     def __init__(self, data_dir: Path, split: str, block_size: int, batch_size: int):
         import glob
@@ -303,15 +308,21 @@ class ShardLoader:
         self.block_size = block_size
         self.batch_size = batch_size
         self.total_tokens = sum(m.shape[0] for m in self.memmaps)
+        # Pinned CPU tensors — source of the async H2D copy.
+        self._pin_x = torch.empty((batch_size, block_size), dtype=torch.int64, pin_memory=True)
+        self._pin_y = torch.empty((batch_size, block_size), dtype=torch.int64, pin_memory=True)
+        self._pin_x_np = self._pin_x.numpy()  # aliased view for fast memmap copies
+        self._pin_y_np = self._pin_y.numpy()
 
     def next_batch(self, rng: np.random.Generator, device):
-        buf = np.empty((self.batch_size, self.block_size + 1), dtype=np.int64)
         for i in range(self.batch_size):
             shard = self.memmaps[rng.integers(len(self.memmaps))]
             start = int(rng.integers(0, shard.shape[0] - self.block_size - 1))
-            buf[i] = shard[start : start + self.block_size + 1]
-        x = torch.from_numpy(buf[:, :-1]).to(device, non_blocking=True)
-        y = torch.from_numpy(buf[:, 1:]).to(device, non_blocking=True)
+            seq = shard[start : start + self.block_size + 1]
+            self._pin_x_np[i] = seq[:-1]
+            self._pin_y_np[i] = seq[1:]
+        x = self._pin_x.to(device, non_blocking=True)
+        y = self._pin_y.to(device, non_blocking=True)
         return x, y
 
     def iter_val(self, device, max_batches=None):
