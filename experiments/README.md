@@ -56,3 +56,4 @@ plan for the full rationale and references.
 | 01-modern-block | RoPE + RMSNorm + SwiGLU + QK-Norm | accepted | **2.988** (Δ −0.052) | 182 k (−4.4 %) | accept; HellaSwag +1.5 pp; tagged `v0.2-exp01` |
 | 02-muon | AdamW → Muon (hidden matmuls) | rejected | 2.988 (Δ −0.0007) | 180 k (−0.7 %) | reject on val-loss axis; time-to-val-3.1 −14 %; null-result preserved |
 | 03-modded-tricks | ReLU² + zero-init + U-Net skips + logit softcap | accepted | **2.964** (Δ −0.024) | 178 k (−1.9 %) | accept; HellaSwag −0.5 pp (within noise); tagged `v0.3-exp03` |
+| 05-speed-pack | max-autotune + GQA (4 KV) + softcap-off (Liger dropped — compile-incompatible) | rejected | 2.992 (Δ +0.028) | **210 k (+15.5 %)** | reject on quality; −13 % wall-clock and time-to-target is 30–75 % faster; GQA at 124 M is the quality cost; softcap-off did NOT recover HellaSwag (−0.8 pp) |

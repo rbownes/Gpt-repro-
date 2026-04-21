@@ -1,10 +1,10 @@
 ---
 id: 05-speed-pack
-status: in-progress
+status: rejected
 baseline_run: runs/03-modded-tricks/
 experiment_run: runs/05-speed-pack/
 baseline_tag: v0.3-exp03
-date: 2026-04-20
+date: 2026-04-21
 author: rjbownes
 seeds: [0]
 ---
@@ -101,17 +101,99 @@ Updated expected contributions (from smoke isolation):
 
 ## Result
 
-(To be filled in after training completes.)
-
 | metric                          | baseline (v0.3) | exp/05 | Δ |
 |---------------------------------|---------------:|-------:|---:|
-| val loss @ 1 B tokens           | 3.4729         |        |   |
-| val loss @ 5 B tokens           | 3.0780         |        |   |
-| val loss @ 10 B tokens          | 2.9641         |        |   |
-| tokens / s median               | 178 215        |        |   |
-| wall-clock 1 epoch              | 15 h 39 min    |        |   |
-| HellaSwag acc (1 000 examples)  | 0.3780         |        |   |
+| parameters                      | 123.6 M        | **114.2 M** | −7.8 % (GQA drops 9.5 M across 12 layers) |
+| val loss @ 1 B tokens           | 3.4729         | 3.4955   | +0.023 |
+| val loss @ 5 B tokens           | 3.0780         | 3.1050   | +0.027 |
+| val loss @ 10 B tokens (best)   | 2.9641         | **2.9922** | **+0.028** |
+| val loss (200-batch held-out)   | 2.9946         | 2.9987   | +0.004 (within noise) |
+| HellaSwag acc (1 000 examples)  | 0.3780         | **0.3700** | **−0.8 pp** |
+| tokens / s median               | 181 732        | **209 857** | **+15.5 %** |
+| tokens / s mean                 | 181 240        | 209 354  | +15.5 % |
+| wall-clock 1 epoch              | 15 h 20 min    | **13 h 17 min** | **−13 %** (saved ~2 h) |
+| time to val loss 3.5            | 96.6 min       | ~22 min  | −77 % |
+| time to val loss 3.2            | 290 min        | ~167 min | −42 % |
+| time to val loss 3.10           | 483 min        | ~335 min | −31 % |
+| time to val loss 3.04           | 883 min        | ~481 min | −46 % |
+
+Run was interrupted at step 2020; resumed from the step-2000 checkpoint.
+Total wall-clock above includes both segments; steady-state tok/s is
+measured across the resumed portion.
+
+### Predicted vs actual
+
+- Predicted tok/s Δ: **+10 % to +20 %** (point **+15 %**). Actual: **+15.5 %** — spot on target. ✅
+- Predicted val loss Δ: **−0.005 to +0.010**. Actual: **+0.028** — **miss, worse than predicted**. ❌
+- Predicted HellaSwag Δ: **+0.3 to +1.5 pp** (softcap-off hypothesis). Actual: **−0.8 pp** — **miss, wrong direction**. The softcap-off hypothesis from exp/03 is **not confirmed**: removing softcap *did not* recover HellaSwag. This is a non-obvious reversal worth recording.
+
+### Loss curve shape
+
+Exp/05 sits **+0.02 to +0.03 worse** than v0.3 at *every* evaluated step from
+2 500 onward. It never catches up — the gap is persistent, not a zero-init
+warmup artefact like exp/03 had. So the quality penalty is load-bearing, not a
+convergence lag.
 
 ## Verdict
 
-(Pending.)
+**Reject.** All three pre-declared criteria must hold; two of three miss.
+
+- val loss @ 10 B Δ: **+0.028** (required ≤ +0.015) ❌
+- HellaSwag: **0.370** (required ≥ 0.373) ❌
+- tok/s: **210 k** (required ≥ 196 k) ✅
+
+### What actually happened
+
+The speed bundle did exactly what it was supposed to do on *throughput*:
+**+15.5 % tok/s**, **−13 % wall-clock (~2 hours saved per 10 B run)**,
+**time-to-every-intermediate-loss is 30 – 75 % faster**. Those are the largest
+throughput wins in this project by a wide margin.
+
+The quality cost is also real and measurable:
+- **GQA 12 → 4 KV heads reduces attention capacity.** At 124 M scale and
+  1 k context, 4 KV heads is *less* capacity than the model is trained for.
+  Larger models tolerate aggressive GQA ratios because the embedding and
+  MLP capacity absorbs the loss; at 124 M we're already capacity-limited.
+  Most of the +0.028 val loss is attributable here.
+- **Softcap removal did not recover HellaSwag.** In exp/03 the softcap-on
+  recipe cost 0.5 pp HellaSwag vs v0.2's no-softcap recipe; I assumed
+  removing softcap would reverse that. Instead HellaSwag dropped *further*
+  (−0.8 pp vs v0.3). So the exp/03 HellaSwag dip is more likely caused by
+  the other modded tricks (U-Net skips, zero-init, ReLU²), not softcap.
+  This falsifies the exp/03 follow-up hypothesis.
+
+### Honest framing
+
+If the experiment were judged purely on **time-to-target-loss**, this is
+an accept: exp/05 reaches v0.3's final loss (2.964) in ~12 h vs v0.3's
+15 h 20 m — a **24 % wall-clock win for the same quality**. But the
+pre-declared criteria were *fixed-tokens* quality metrics, and on those
+axes we regressed. The discipline is to judge by the pre-declared
+criteria, not rewrite them post-hoc.
+
+### What's preserved
+
+- `src/gpt_repro/model.py` retains `n_kv_head`, `use_liger_fused_ce`,
+  and the `CausalSelfAttention` refactor (packed QKV with grouped KV).
+- `configs/gpt2_124m_speedpack.py` preserved as-is.
+- `tests/test_speed_pack.py` — 7 tests, all passing.
+- `src/gpt_repro/train.py` retains `compile_mode` (default `"default"`;
+  the +6 % free-win is still opt-in per-run via `--override`).
+
+### Follow-up candidates, ordered by value
+
+1. **Ablate GQA alone** (`exp/05b`, likely). Keep max-autotune +
+   softcap-off (already in speedpack), turn GQA off (`n_kv_head=None`).
+   Hypothesis: if GQA is the main quality cost, this recovers v0.3 loss
+   at ~193 k tok/s (halfway between v0.3 and exp/05). Settles the
+   "can we get just speed without quality cost" question cleanly.
+2. **Re-examine the exp/03 softcap dip.** The u_net_skips or zero-init
+   is a more plausible culprit than softcap. Worth a cheap ablation.
+3. **Muon retry on the speed pack** (if GQA ablation accepts). Exp/02
+   rejected Muon on v0.2 because AdamW caught up by 10 B; on a −8 %
+   smaller model the optimisation landscape shifts — possibly enough
+   for Muon to persist.
+
+No new `v0.x` tag. `v0.3-exp03` remains the live quality baseline;
+`compile_mode=max-autotune-no-cudagraphs` remains the free +6 %
+opt-in for any future experiment.
