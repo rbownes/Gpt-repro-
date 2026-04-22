@@ -1,10 +1,10 @@
 ---
 id: 06-muon-mup
-status: in-progress
+status: rejected
 baseline_run: runs/03-modded-tricks/
 experiment_run: runs/06-muon-mup/
 baseline_tag: v0.3-exp03
-date: 2026-04-21
+date: 2026-04-22
 author: rjbownes
 seeds: [0]
 ---
@@ -81,21 +81,61 @@ The **Muon side** of this diff is the load-bearing change and carries all predic
 
 ## Result
 
-| metric                          | baseline (v0.3) | exp/06 | Δ |
-|---------------------------------|----------------:|-------:|---:|
-| val loss @ 1 B tokens           | 3.4729          |        |   |
-| val loss @ 5 B tokens           | 3.0780          |        |   |
-| val loss @ 10 B tokens (best)   | 2.9641          |        |   |
-| val loss (200-batch held-out)   | 2.9694          |        |   |
-| HellaSwag acc (1 000 examples)  | 0.3780          |        |   |
-| tokens / s median               | 178 215         |        |   |
-| wall-clock 1 epoch              | 15 h 39 min     |        |   |
-| time to val loss 3.10           | 418 min         |        |   |
-| time to val loss 3.00           | 713 min         |        |   |
+| metric                           | baseline (v0.3) | exp/06   | Δ |
+|----------------------------------|----------------:|---------:|---:|
+| val loss @ 1 B tokens (step 2 000)   | 3.4729          | **3.4205** | **−0.0523** |
+| val loss @ 5 B tokens (step 9 500)   | **3.0780**      | 3.1677     | +0.0897 |
+| val loss @ 10 B tokens (best val)    | **2.9641**      | 2.9737     | +0.0096 |
+| val loss @ 10 B tokens (final step)  | **2.9642**      | 2.9742     | +0.0101 |
+| HellaSwag acc (1 000 examples)       | 0.3780          | *not run*  | — |
+| tokens / s median                    | 178 217         | 177 902    | −315 (**−0.18 %**) |
+| wall-clock 1 epoch                   | 15 h 39 min     | 15 h 40 min | +1 min |
+| time to val loss 3.500               | 98.4 min        | **73.9 min** | **1.33× faster** |
+| time to val loss 3.200               | **270 min**     | 418 min    | 0.65× |
+| time to val loss 3.100               | **418 min**     | 615 min    | 0.68× |
+| time to val loss 3.000               | **713 min**     | 838 min    | 0.85× |
+| time to val loss 2.975               | **836 min**     | 936 min    | 0.89× |
 
-- **Seeds:** single seed (0) for this first cut. If the signal is within ±0.03 of the accept bar, add seeds 1 & 2.
-- **Loss curves:** attach `report_assets/loss_curve.png` on completion.
+- **Seeds:** single seed (0). Result is far from the accept bar (Δ must be ≤ −0.020; actual Δ = +0.010) so no additional seeds warranted — the effect direction is unambiguous even under noise.
+- **HellaSwag:** the paper-battery eval wasn't wired into this run. Can be computed post-hoc from `runs/06-muon-mup/best_val.pt` if needed; skipping for now because the val-loss result already decides the verdict.
+
+### Three-phase trajectory — the core finding
+
+The Δ between exp/06 and exp/03 is **not monotone**; it's a three-phase curve, which is the essential pattern this experiment documents:
+
+| phase             | steps        | tokens        | behaviour |
+|-------------------|-------------:|--------------:|-----------|
+| Muon dominant     | 500 – 2 500  | 0.26 – 1.31 B | Peak Muon lead of **−0.644** at step 500. At 1 B tokens, Muon is 0.052 ahead. |
+| AdamW overtakes   | 2 500 – 8 500 | 1.31 – 4.46 B | Crossover at step 3 000 (1.57 B). Gap grows to **+0.092** at step 8 500 — Muon's worst point. |
+| Muon catches up   | 8 500 – 19 073 | 4.46 – 10.0 B | Gap closes linearly; exp/06 ends at Δ = +0.010 (essentially tied, same shape as exp/02 at exp/02's scale). |
+
+Practically, Muon wins the first ~1.5 B tokens of training by a **big** margin (1.33× faster to val loss 3.5), loses the middle ~3 B tokens, and nearly ties by the end.
+
+### Throughput
+
+tok/s regression is **negligible** (−0.18 %, 315 tok/s on a base of 178 k). Prediction was −3 % to −8 %; autoresearch had measured −6 % at batch=32. At the v0.3 effective batch of 512 seqs, Polar Express and NorMuon overhead is dwarfed by the 32 forward/backward passes in grad accumulation. This invalidates the cost argument against Muon on this hardware — Muon is essentially free on tok/s.
+
+### μP
+
+As designed, a no-op at base width. `apply_mup` reported `self-base (146 params); LR scaling is a no-op at base width`. Every `mup_width_mult = 1.0`, every `mup_lr_scale = 1.0`. The machinery is exercised in production code path and ready for the first non-base-width run (350 M, or a 20 M proxy for exp/08).
 
 ## Verdict
 
-**TBD** — fill in on run completion.
+**Reject** on the pre-declared primary axis: val loss Δ @ 10 B = **+0.010**, vs the accept bar of **≤ −0.020** and the reject floor of **< 0.005**. This is the same qualitative outcome as exp/02 (plain Muon on v0.2, Δ = −0.0007), but measured against a stronger baseline (v0.3 with zero-init + U-Net + softcap): the zero-init + U-Net claim from the exp/03 follow-up section *did not* alter the Muon-vs-AdamW crossover behaviour.
+
+**Keep the code, not the config.** `src/gpt_repro/optim_muon.py` and `src/gpt_repro/mup.py` stay on main; the config `configs/gpt2_124m_modernplus_muon_mup.py` is preserved for reproducibility but is **not** promoted to the new baseline. `v0.3-exp03` remains the baseline tag.
+
+## Recommendations / follow-ups
+
+1. **Do NOT re-run a vanilla Muon v4 on v0.3 — the answer is settled.** Two consecutive experiments (exp/02, exp/06) on two different architectures produced the same result: Muon ≈ AdamW at 10 B tokens, Muon ahead at ≤ 2 B tokens. The hypothesis that "v0.3's zero-init + U-Net shifts the landscape enough for Muon to pull ahead" is falsified.
+
+2. **exp/07 — retuned Muon schedule.** The closure rate between steps 9 000 and 19 000 is suspiciously linear at ~0.0025 / 500 steps. Two plausible fixes to turn Muon into a net win:
+   - **Lower `muon_lr`** from 0.02 toward 0.01. The peak lead at step 500 suggests Muon overshoots at current LR; less overshoot → less mid-training correction → smaller AdamW lead in steps 3 000 – 8 500.
+   - **Warmdown that decays Muon harder than AdamW.** nanochat's recipe uses a trapezoid + linear warmdown (65 % of total steps) rather than full cosine; this biases the last third of training toward small, stable updates where Muon's orthogonalisation bias matters less. Either per-group cosine parameters (Muon decays to `min_lr_ratio_muon=0.05`, AdamW to `min_lr_ratio_adamw=0.2`) or a scheduled transition.
+   - Both are config-only; no new code.
+
+3. **This result is a clear argument FOR short-run regimes.** At 1 B tokens, Muon wins by 0.052 val loss with no tok/s cost. If the project ever needs a "cheap development loop" (early architecture comparison, ablations), Muon is the right optimiser. **For future experiments that plan to train < 2 B tokens — always prefer Muon; for ≥ 5 B tokens — stick with AdamW until exp/07 retunes the schedule.**
+
+4. **The 0.18 % tok/s cost is the headline non-result.** The autoresearch loop's −6 % measurement at batch=32 doesn't transfer to production batch=512. This is useful for anyone considering Muon on this hardware: cost is effectively zero at large effective batches, the only axis to evaluate on is quality.
+
+5. **μP infrastructure is ready.** Next experiment (recommend exp/08) should be the 20 M proxy HP sweep + transfer back to 124 M, which is the actual play that μP enables. Current hand-tuned HPs on 124 M are inherited from exp/00, unlikely to be optimal.

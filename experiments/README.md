@@ -56,3 +56,4 @@ plan for the full rationale and references.
 | 01-modern-block | RoPE + RMSNorm + SwiGLU + QK-Norm | accepted | **2.988** (Δ −0.052) | 182 k (−4.4 %) | accept; HellaSwag +1.5 pp; tagged `v0.2-exp01` |
 | 02-muon | AdamW → Muon (hidden matmuls) | rejected | 2.988 (Δ −0.0007) | 180 k (−0.7 %) | reject on val-loss axis; time-to-val-3.1 −14 %; null-result preserved |
 | 03-modded-tricks | ReLU² + zero-init + U-Net skips + logit softcap | accepted | **2.964** (Δ −0.024) | 178 k (−1.9 %) | accept; HellaSwag −0.5 pp (within noise); tagged `v0.3-exp03` |
+| 06-muon-mup | MuonAdamW (nanochat port) + μP plumbing on v0.3 | rejected | 2.974 (Δ +0.010) | 178 k (−0.2 %) | reject on val-loss axis; Muon wins 1B-token lead by 0.052, loses 5B-token middle by 0.09, closes to near-tie at 10B. Same pattern as exp/02. μP infra landed (no-op at base width). |
