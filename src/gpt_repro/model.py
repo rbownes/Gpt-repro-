@@ -52,6 +52,16 @@ class GPTConfig:
     u_net_skips: bool = False              # second half of layers receive skip from first half
     logit_softcap: float | None = None     # if set, logits go through s*tanh(x/s)
 
+    # --- Multi-head Latent Attention (DeepSeek-V2; exp/10) -------------------
+    # "mha" = plain multi-head attention (faithful / v0.3 default).
+    # "mla" = latent-bottleneck attention with decoupled RoPE. At inference
+    # the cache shrinks from 2·n_head·d_head per token to d_kv_comp + d_qk_rope.
+    attention_type: str = "mha"            # 'mha' | 'mla'
+    mla_d_kv_comp: int = 256               # KV compression latent dim
+    mla_d_qk_nope: int = 32                # per-head "no-pe" chunk of Q/K (the attended-dot part)
+    mla_d_qk_rope: int = 32                # shared-across-heads RoPE-rotated chunk of Q/K
+    mla_d_v: int = 64                      # per-head V dim
+
 
 _VALID_BACKENDS = {"sdpa_cudnn", "sdpa_flash", "sdpa_math", "sdpa_efficient", "flash_attn_2"}
 
@@ -187,6 +197,120 @@ class CausalSelfAttention(nn.Module):
         return self.c_proj(y)
 
 
+class MLAttention(nn.Module):
+    """Multi-head Latent Attention (DeepSeek-V2 arXiv 2405.04434).
+
+    KV is compressed to a shared low-rank latent `c_kv` (dim=d_kv_comp) plus a
+    short RoPE-rotated chunk `k_pe` (dim=d_qk_rope, one per token, broadcast
+    across heads). Per-head K/V are reconstructed at attention time via W_uk /
+    W_uv. Q is computed as [q_nope | q_pe] per head, where q_pe is the only
+    part that gets RoPE.
+
+    Why this is a thing: at inference, only c_kv (+ k_pe) needs caching, which
+    is ~5–10× smaller than a full MHA cache. DeepSeek-V2 claims parity-or-
+    better quality vs. GQA at much lower KV memory.
+
+    Key constraints:
+    - QK-Norm (if enabled in cfg) is applied only to the no-pe parts, matching
+      the DeepSeek paper: RoPE-rotated components don't get a pre-norm.
+    - Causal SDPA. No flash_attn_2 path (MLA head shape differs from MHA; the
+      CausalSelfAttention flash_attn_2 branch isn't reusable here).
+    - RoPE cos/sin passed in must have last dim = cfg.mla_d_qk_rope. The GPT
+      module registers a separately-sized RoPE buffer when attention_type='mla'.
+    """
+
+    def __init__(self, cfg: GPTConfig):
+        super().__init__()
+        self.n_head = cfg.n_head
+        self.d_qk_nope = cfg.mla_d_qk_nope
+        self.d_qk_rope = cfg.mla_d_qk_rope
+        self.d_v = cfg.mla_d_v
+        self.d_kv_comp = cfg.mla_d_kv_comp
+        self.use_qk_norm = cfg.qk_norm
+        self.dropout = cfg.dropout
+
+        # Q path: straight projection to (n_head × (d_qk_nope + d_qk_rope)). We
+        # *don't* add a Q-compression latent (DeepSeek uses one in 236B+; at
+        # 124M it's overhead for no win).
+        self.q_proj = nn.Linear(
+            cfg.n_embd, cfg.n_head * (self.d_qk_nope + self.d_qk_rope), bias=cfg.bias,
+        )
+        # Down-projection producing BOTH the KV latent and the shared k_pe.
+        self.kv_down = nn.Linear(
+            cfg.n_embd, self.d_kv_comp + self.d_qk_rope, bias=cfg.bias,
+        )
+        # Up-projection from KV latent to per-head [k_nope | v]. Bias-less by
+        # convention (DeepSeek paper uses no bias on the up-projections).
+        self.kv_up = nn.Linear(
+            self.d_kv_comp, cfg.n_head * (self.d_qk_nope + self.d_v), bias=False,
+        )
+        # Output proj (n_head * d_v → n_embd). Kept as `.c_proj` so the
+        # modded-nanogpt `zero_init_proj` rule still hits MLA's out-proj.
+        self.c_proj = nn.Linear(cfg.n_head * self.d_v, cfg.n_embd, bias=cfg.bias)
+
+        if cfg.qk_norm:
+            # QK-Norm only on the no-pe parts (DeepSeek convention). Applied
+            # *before* the q_nope/k_nope enter the attention matmul.
+            self.q_norm = RMSNorm(self.d_qk_nope)
+            self.k_norm = RMSNorm(self.d_qk_nope)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor | None = None,
+        sin: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        B, T, _ = x.size()
+        H, Dn, Dp, Dv = self.n_head, self.d_qk_nope, self.d_qk_rope, self.d_v
+        assert cos is not None and sin is not None, "MLA requires RoPE (cos/sin)"
+        assert cos.shape[-1] == Dp, f"expected cos/sin dim {Dp}, got {cos.shape[-1]}"
+
+        # Q → per-head [q_nope, q_pe], laid out as (B, H, T, *) so the shared
+        # cos/sin of shape (T, Dp) broadcasts correctly over (B, H, T, Dp).
+        q = self.q_proj(x).view(B, T, H, Dn + Dp).transpose(1, 2)  # (B, H, T, Dn+Dp)
+        q_nope, q_pe = q.split([Dn, Dp], dim=-1)                   # (B, H, T, Dn), (B, H, T, Dp)
+
+        # KV down → (c_kv, k_pe). k_pe is *shared* across heads.
+        kv_down = self.kv_down(x)                                  # (B, T, d_kv_comp + Dp)
+        c_kv, k_pe = kv_down.split([self.d_kv_comp, Dp], dim=-1)   # (B, T, d_kv_comp), (B, T, Dp)
+
+        # KV up → per-head [k_nope, v], same (B, H, T, *) layout.
+        kv_up = self.kv_up(c_kv).view(B, T, H, Dn + Dv).transpose(1, 2)  # (B, H, T, Dn+Dv)
+        k_nope, v = kv_up.split([Dn, Dv], dim=-1)                  # (B, H, T, Dn), (B, H, T, Dv)
+
+        # QK-Norm on the *no-pe* parts only (RoPE-rotated parts skip norm).
+        if self.use_qk_norm:
+            q_nope = self.q_norm(q_nope)
+            k_nope = self.k_norm(k_nope)
+
+        # RoPE on the pe parts. q_pe is (B, H, T, Dp); k_pe is (B, T, Dp) and
+        # gets broadcast across H heads.
+        q_pe = apply_rope(q_pe, cos, sin)                          # (B, H, T, Dp)
+        k_pe = apply_rope(k_pe, cos, sin)                          # (B, T, Dp)
+        k_pe_per_head = k_pe.unsqueeze(1).expand(B, H, T, Dp)      # broadcast → (B, H, T, Dp)
+
+        # Assemble full Q and K. Shape (B, H, T, Dn + Dp). v is already shaped.
+        q = torch.cat([q_nope, q_pe], dim=-1)
+        k = torch.cat([k_nope, k_pe_per_head], dim=-1)
+
+        y = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        # Reshape from (B, H, T, Dv) → (B, T, H*Dv) → project to n_embd.
+        y = y.transpose(1, 2).contiguous().view(B, T, H * Dv)
+        return self.c_proj(y)
+
+
+def make_attention(cfg: GPTConfig) -> nn.Module:
+    if cfg.attention_type == "mha":
+        return CausalSelfAttention(cfg)
+    if cfg.attention_type == "mla":
+        return MLAttention(cfg)
+    raise ValueError(f"Unknown attention_type: {cfg.attention_type!r}")
+
+
 # --- MLPs ------------------------------------------------------------------
 
 
@@ -267,7 +391,7 @@ class Block(nn.Module):
         # `ln_1`/`ln_2` varies with `cfg.norm_type`; HF gpt2 weights only load
         # into LayerNorm-shaped keys, which is the faithful default.
         self.ln_1 = make_norm(cfg, cfg.n_embd)
-        self.attn = CausalSelfAttention(cfg)
+        self.attn = make_attention(cfg)
         self.ln_2 = make_norm(cfg, cfg.n_embd)
         self.mlp = make_mlp(cfg)
 
@@ -306,8 +430,13 @@ class GPT(nn.Module):
             self.lm_head.weight = self.transformer.wte.weight
 
         if self.use_rope:
-            head_dim = cfg.n_embd // cfg.n_head
-            cos, sin = rope_freqs(head_dim, cfg.block_size, cfg.rope_base)
+            # Under MLA the RoPE-rotated chunk is `mla_d_qk_rope` wide, not
+            # the per-head dim — so the shared RoPE table needs that size.
+            if cfg.attention_type == "mla":
+                rope_dim = cfg.mla_d_qk_rope
+            else:
+                rope_dim = cfg.n_embd // cfg.n_head
+            cos, sin = rope_freqs(rope_dim, cfg.block_size, cfg.rope_base)
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
 
