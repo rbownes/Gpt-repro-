@@ -282,3 +282,136 @@ def test_modernplus_overfit() -> None:
         opt.step()
         final = loss.item()
     assert final < 0.5, f"modernplus overfit failed: final {final:.4f}"
+
+
+# ---- MLA (Multi-head Latent Attention, exp/10) -----------------------------
+
+
+def _mla_cfg(**overrides) -> GPTConfig:
+    """v0.3-style model with MLA attention swapped in, at test scale.
+
+    n_embd=64, n_head=2 so d_head=32. MLA chunks: d_qk_nope=16, d_qk_rope=16,
+    d_v=32, d_kv_comp=64. Sized so the attention layer is non-trivial but the
+    whole model is tiny.
+    """
+    base = dict(
+        vocab_size=VOCAB_SIZE,
+        block_size=64,
+        n_layer=4,
+        n_head=2,
+        n_embd=64,
+        attention_backend="sdpa_math",
+        positional_encoding="rope",
+        norm_type="rmsnorm",
+        mlp_type="relu2",
+        qk_norm=True,
+        zero_init_proj=True,
+        u_net_skips=True,
+        logit_softcap=30.0,
+        attention_type="mla",
+        mla_d_kv_comp=64,
+        mla_d_qk_nope=16,
+        mla_d_qk_rope=16,
+        mla_d_v=32,
+    )
+    base.update(overrides)
+    return GPTConfig(**base)
+
+
+def test_mla_forward_shapes() -> None:
+    cfg = _mla_cfg()
+    model = GPT(cfg)
+    x = torch.randint(0, cfg.vocab_size, (3, cfg.block_size))
+    logits, loss = model(x, x)
+    assert logits.shape == (3, cfg.block_size, cfg.vocab_size)
+    assert torch.isfinite(loss)
+
+
+def test_mla_rope_buffer_sized_to_d_qk_rope() -> None:
+    """MLA re-sizes the shared RoPE table to mla_d_qk_rope, not n_embd/n_head."""
+    cfg = _mla_cfg(mla_d_qk_rope=16)
+    model = GPT(cfg)
+    assert model.rope_cos.shape[-1] == 16
+    assert model.rope_sin.shape[-1] == 16
+
+
+def test_mla_backward_nonzero_grads_without_zero_init() -> None:
+    """With zero_init_proj=False every MLA parameter receives a non-zero grad
+    on the first step. (With zero_init_proj=True, block-internal grads are
+    blocked by the zero out-projections — that's the modded-nanogpt design.)"""
+    cfg = _mla_cfg(zero_init_proj=False)
+    model = GPT(cfg)
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    y = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    _, loss = model(x, y)
+    loss.backward()
+    dead = [n for n, p in model.named_parameters()
+            if p.requires_grad and (p.grad is None or p.grad.abs().sum() == 0)]
+    assert not dead, f"{len(dead)} MLA params with zero grad: {dead[:5]}"
+
+
+def test_mla_qk_norm_only_on_nope() -> None:
+    """QK-Norm RMSNorm weights match d_qk_nope, not d_head or d_qk_rope."""
+    cfg = _mla_cfg(qk_norm=True)
+    model = GPT(cfg)
+    attn = model.transformer.h[0].attn
+    assert attn.q_norm.weight.shape == (cfg.mla_d_qk_nope,)
+    assert attn.k_norm.weight.shape == (cfg.mla_d_qk_nope,)
+
+
+def test_mla_switches_cleanly_from_mha() -> None:
+    """Same outer GPTConfig with attention_type='mha' vs 'mla' both build and
+    forward cleanly at matched hyperparams."""
+    base = _mla_cfg().__dict__
+    mha_kwargs = {**base, "attention_type": "mha"}
+    # mla-specific fields are ignored by the MHA path, but they're still valid
+    # fields on GPTConfig so no need to drop them.
+    mha_model = GPT(GPTConfig(**mha_kwargs))
+    mla_model = GPT(GPTConfig(**base))
+    x = torch.randint(0, base["vocab_size"], (2, base["block_size"]))
+    for m in (mha_model, mla_model):
+        _, loss = m(x, x)
+        assert torch.isfinite(loss)
+
+
+def test_mla_param_count_smaller_than_mha_at_124m() -> None:
+    """At 124M with these MLA chunks, the model is ~116M (attn has fewer params).
+    This is a known accounting fact; fail loudly if it ever changes."""
+    mha = GPT(GPTConfig(
+        n_layer=12, n_head=12, n_embd=768,
+        positional_encoding="rope", norm_type="rmsnorm",
+        mlp_type="relu2", qk_norm=True,
+        zero_init_proj=True, u_net_skips=True, logit_softcap=30.0,
+        attention_type="mha",
+    ))
+    mla = GPT(GPTConfig(
+        n_layer=12, n_head=12, n_embd=768,
+        positional_encoding="rope", norm_type="rmsnorm",
+        mlp_type="relu2", qk_norm=True,
+        zero_init_proj=True, u_net_skips=True, logit_softcap=30.0,
+        attention_type="mla",
+        mla_d_kv_comp=256, mla_d_qk_nope=32, mla_d_qk_rope=32, mla_d_v=64,
+    ))
+    mha_n = sum(p.numel() for p in mha.parameters())
+    mla_n = sum(p.numel() for p in mla.parameters())
+    # MLA should be strictly fewer, within 10% of MHA (~6.5% expected).
+    assert mla_n < mha_n, f"expected MLA < MHA params, got {mla_n} vs {mha_n}"
+    assert (mha_n - mla_n) / mha_n < 0.10, (
+        f"MLA is {(mha_n - mla_n)/mha_n*100:.2f}% smaller — expected ≤ 10%"
+    )
+
+
+def test_mla_overfit_tiny_batch() -> None:
+    torch.manual_seed(0)
+    cfg = _mla_cfg(block_size=32)
+    model = GPT(cfg)
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
+    final = float("nan")
+    for _ in range(400):
+        opt.zero_grad()
+        _, loss = model(x, x)
+        loss.backward()
+        opt.step()
+        final = loss.item()
+    assert final < 0.5, f"MLA overfit failed: final {final:.4f}"
