@@ -52,6 +52,13 @@ class GPTConfig:
     u_net_skips: bool = False              # second half of layers receive skip from first half
     logit_softcap: float | None = None     # if set, logits go through s*tanh(x/s)
 
+    # --- Weight-tied looped transformer (exp/11) -----------------------------
+    # When True, `transformer.h` holds a single Block and `GPT.forward` applies
+    # it `n_layer` times sequentially. Parameter count drops by ~(n_layer - 1) ×
+    # block params. `u_net_skips` must be False under tying (every layer is the
+    # same module, so the skip pattern is degenerate).
+    weight_tied: bool = False
+
 
 _VALID_BACKENDS = {"sdpa_cudnn", "sdpa_flash", "sdpa_math", "sdpa_efficient", "flash_attn_2"}
 
@@ -291,10 +298,23 @@ class GPT(nn.Module):
         self.cfg = cfg
         self.use_rope = cfg.positional_encoding == "rope"
 
+        # Under weight tying, build ONE Block and loop it `n_layer` times in
+        # forward. Reject the combination with U-Net skips (degenerate: every
+        # "layer" is the same module, so the cross-depth info flow is null).
+        if cfg.weight_tied:
+            if cfg.u_net_skips:
+                raise ValueError(
+                    "weight_tied=True is incompatible with u_net_skips=True "
+                    "(every 'layer' is the same module; the skip pattern is "
+                    "degenerate)."
+                )
+            h_list: list[nn.Module] = [Block(cfg)]
+        else:
+            h_list = [Block(cfg) for _ in range(cfg.n_layer)]
         modules: dict[str, nn.Module] = {
             "wte": nn.Embedding(cfg.vocab_size, cfg.n_embd),
             "drop": nn.Dropout(cfg.dropout) if cfg.dropout > 0 else nn.Identity(),
-            "h": nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)]),
+            "h": nn.ModuleList(h_list),
             "ln_f": make_norm(cfg, cfg.n_embd),
         }
         if not self.use_rope:
@@ -367,7 +387,15 @@ class GPT(nn.Module):
             cos = sin = None
 
         blocks = self.transformer.h
-        if self.cfg.u_net_skips:
+        if self.cfg.weight_tied:
+            # Pure weight tying: one shared Block, applied n_layer times.
+            # Residual stream still receives n_layer updates; gradients
+            # accumulate into the single set of block weights. `u_net_skips`
+            # is guaranteed False here by the __init__ guard.
+            shared = blocks[0]
+            for _ in range(self.cfg.n_layer):
+                x = shared(x, cos=cos, sin=sin)
+        elif self.cfg.u_net_skips:
             # U-Net style cross-depth shortcuts: layer i ≥ n/2 adds the
             # post-block output of layer n-1-i to its input. First half
             # pushes onto a LIFO, second half pops. Matches modded-nanogpt.

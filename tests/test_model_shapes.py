@@ -282,3 +282,106 @@ def test_modernplus_overfit() -> None:
         opt.step()
         final = loss.item()
     assert final < 0.5, f"modernplus overfit failed: final {final:.4f}"
+
+
+# ---- Weight-tied loop (exp/11 LoopLLM) -------------------------------------
+
+
+def _looped_cfg(**overrides) -> GPTConfig:
+    base = dict(
+        vocab_size=VOCAB_SIZE,
+        block_size=64,
+        n_layer=4,                   # enough iterations to be meaningful
+        n_head=2,
+        n_embd=64,
+        attention_backend="sdpa_math",
+        positional_encoding="rope",
+        norm_type="rmsnorm",
+        mlp_type="relu2",
+        qk_norm=True,
+        zero_init_proj=True,
+        u_net_skips=False,           # REQUIRED off under tying
+        logit_softcap=30.0,
+        weight_tied=True,
+    )
+    base.update(overrides)
+    return GPTConfig(**base)
+
+
+def test_weight_tied_single_block_instance() -> None:
+    """`transformer.h` is a length-1 ModuleList under tying."""
+    cfg = _looped_cfg()
+    model = GPT(cfg)
+    assert len(model.transformer.h) == 1, (
+        f"weight_tied=True should create 1 Block, got {len(model.transformer.h)}"
+    )
+
+
+def test_weight_tied_forward_applies_n_layer_times() -> None:
+    """Instrument the shared Block; assert it is called `n_layer` times per forward."""
+    cfg = _looped_cfg(n_layer=4)
+    model = GPT(cfg).eval()
+    calls = [0]
+    original = model.transformer.h[0].forward
+
+    def counting(*args, **kwargs):
+        calls[0] += 1
+        return original(*args, **kwargs)
+
+    model.transformer.h[0].forward = counting  # type: ignore[method-assign]
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    with torch.no_grad():
+        model(x)
+    assert calls[0] == cfg.n_layer, (
+        f"shared block called {calls[0]} times, expected {cfg.n_layer}"
+    )
+
+
+def test_weight_tied_rejects_u_net_skips() -> None:
+    """weight_tied=True + u_net_skips=True must raise at model-construction."""
+    with pytest.raises(ValueError, match="u_net_skips"):
+        GPT(_looped_cfg(u_net_skips=True))
+
+
+def test_weight_tied_param_count_at_124m() -> None:
+    """v0.3 arch at weight_tied=True is ~45 M (37 % of untied's 124 M)."""
+    untied = GPT(GPTConfig(
+        n_layer=12, n_head=12, n_embd=768,
+        positional_encoding="rope", norm_type="rmsnorm",
+        mlp_type="relu2", qk_norm=True,
+        zero_init_proj=True, u_net_skips=True, logit_softcap=30.0,
+        weight_tied=False,
+    ))
+    tied = GPT(GPTConfig(
+        n_layer=12, n_head=12, n_embd=768,
+        positional_encoding="rope", norm_type="rmsnorm",
+        mlp_type="relu2", qk_norm=True,
+        zero_init_proj=True, u_net_skips=False, logit_softcap=30.0,
+        weight_tied=True,
+    ))
+    n_untied = sum(p.numel() for p in untied.parameters())
+    n_tied = sum(p.numel() for p in tied.parameters())
+    ratio = n_tied / n_untied
+    assert 0.35 < ratio < 0.42, (
+        f"expected tied/untied ≈ 0.37, got {ratio:.3f} ({n_tied:,} vs {n_untied:,})"
+    )
+
+
+def test_weight_tied_overfit_tiny_batch() -> None:
+    """Sanity: looped K=4 model still overfits a tiny batch under AdamW.
+
+    Gate is 0.7 (not 0.5) because the tied model has much less capacity.
+    """
+    torch.manual_seed(0)
+    cfg = _looped_cfg(block_size=32, n_layer=4)
+    model = GPT(cfg)
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
+    final = float("nan")
+    for _ in range(400):
+        opt.zero_grad()
+        _, loss = model(x, x)
+        loss.backward()
+        opt.step()
+        final = loss.item()
+    assert final < 0.7, f"LoopLLM overfit failed: final loss {final:.4f}"
