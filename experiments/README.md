@@ -56,3 +56,4 @@ plan for the full rationale and references.
 | 01-modern-block | RoPE + RMSNorm + SwiGLU + QK-Norm | accepted | **2.988** (Δ −0.052) | 182 k (−4.4 %) | accept; HellaSwag +1.5 pp; tagged `v0.2-exp01` |
 | 02-muon | AdamW → Muon (hidden matmuls) | rejected | 2.988 (Δ −0.0007) | 180 k (−0.7 %) | reject on val-loss axis; time-to-val-3.1 −14 %; null-result preserved |
 | 03-modded-tricks | ReLU² + zero-init + U-Net skips + logit softcap | accepted | **2.964** (Δ −0.024) | 178 k (−1.9 %) | accept; HellaSwag −0.5 pp (within noise); tagged `v0.3-exp03` |
+| 10-mla | Multi-head Latent Attention (DeepSeek-V2) on v0.3 | rejected | 2.981 (Δ +0.016) | 183 k (**+2.6 %**) | reject on val-loss axis by 0.0014 past the accept bar; flat gap across whole run. Model is 115.7 M (−6.5 %) — smaller attn params dominate cost, so MLA is net **faster** despite extra up-proj. MLA's real motivation (RL-time KV cache) untested by this run. |

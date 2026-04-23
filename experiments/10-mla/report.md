@@ -1,10 +1,10 @@
 ---
 id: 10-mla
-status: in-progress
+status: rejected
 baseline_run: runs/03-modded-tricks/
 experiment_run: runs/10-mla/
 baseline_tag: v0.3-exp03
-date: 2026-04-22
+date: 2026-04-23
 author: rjbownes
 seeds: [0]
 ---
@@ -84,20 +84,70 @@ This is a design choice — MLA's chunking can be scaled up to parameter-match M
 
 ## Result
 
-| metric                          | baseline (v0.3) | exp/10 | Δ |
-|---------------------------------|---------------:|-------:|---:|
-| val loss @ 1 B tokens           | 3.4729         |        |   |
-| val loss @ 5 B tokens           | 3.0780         |        |   |
-| val loss @ 10 B tokens (best)   | 2.9641         |        |   |
-| HellaSwag acc (1 000 examples)  | 0.3780         |        |   |
-| tokens / s median               | 178 217        |        |   |
-| wall-clock 1 epoch              | 15 h 39 min    |        |   |
-| peak VRAM                       | ~14 GB         |        |   |
-| model params                    | 123.7 M        | 115.7 M | **−6.5 %** |
+| metric                           | baseline (v0.3) | exp/10 MLA | Δ |
+|----------------------------------|----------------:|-----------:|---:|
+| val loss @ 1 B tokens            | 3.4729          | 3.4891     | +0.0163 |
+| val loss @ 5 B tokens            | 3.0780          | 3.0955     | +0.0175 |
+| val loss @ 10 B tokens (final)   | **2.9642**      | 2.9806     | +0.0165 |
+| best val loss                    | **2.9641**      | 2.9805     | +0.0164 |
+| HellaSwag acc (1 000 examples)   | 0.3780          | *not run*  | — |
+| tokens / s median                | 178 217         | **182 906** | **+2.63 %** |
+| wall-clock 1 epoch               | 15 h 39 min     | **15 h 13 min** | **−26 min** |
+| model params                     | 123.7 M         | 115.7 M    | **−6.5 %** |
 
-- **Seeds:** single seed (0). If result is within ±0.02 of the accept threshold, add seeds 1 & 2 before deciding.
-- **Loss curves:** attach `report_assets/loss_curve.png` on completion.
+**Time-to-target** (first eval ≤ threshold):
+
+| threshold | v0.3 MHA | exp/10 MLA | speedup |
+|---:|---:|---:|---:|
+| ≤ 3.500 | 98.4 min | **96.3 min** | **1.02×** |
+| ≤ 3.200 | **270 min** | 288 min | 0.94× |
+| ≤ 3.100 | **418 min** | 455 min | 0.92× |
+| ≤ 3.000 | **713 min** | 766 min | 0.93× |
+| ≤ 2.990 | **762 min** | 838 min | 0.91× |
+
+### Loss-curve shape — constant gap, not a crossover
+
+Unlike exp/06 (Muon+AdamW), exp/10 is **not** a crossover story. MLA lands behind at step 500 already and the gap stays within [+0.01, +0.024] for the entire run. The per-step Δ is essentially a flat +0.016 offset:
+
+| step | v0.3 | exp/10 | Δ |
+|---:|---:|---:|---:|
+|   500 | 4.7746 | 4.7555 | **−0.0191** ← MLA's only lead |
+|  1000 | 3.8634 | 3.8687 | +0.0054 |
+|  1500 | 3.5981 | 3.6212 | +0.0231 |
+| 10000 | 3.0675 | 3.0851 | +0.0176 |
+| 18500 | 2.9657 | 2.9827 | +0.0170 |
+| 19000 | 2.9641 | 2.9805 | +0.0164 |
+
+The only step where MLA beat v0.3 was step 500. Everywhere else it's been behind by ~0.015–0.023.
+
+### Against pre-declared criteria
+
+- **Quality-neutral accept** (Δ ∈ [−0.02, +0.015] AND tok/s ≤ 10 %): **FAIL by 0.0014** on the val-loss axis; the tok/s axis passes comfortably (−0 % — in fact +2.6 % improvement). Δ = +0.0164 vs the +0.015 threshold.
+- **Strong accept** (Δ ≤ −0.015): FAIL.
+- **Reject** (Δ > +0.015 OR tok/s > 15 % regression): **triggers** on Δ by 0.0014.
+
+### Predicted vs actual
+
+- Predicted val-loss Δ: **[−0.010, +0.020]**, point **+0.005**. Actual: **+0.0164** — within the predicted range but above the point estimate and just past the accept bar. ✅ range / ❌ accept.
+- Predicted tok/s Δ: **[−8 %, −2 %]**. Actual: **+2.6 %** — **outside the predicted range, in the wrong direction**. MLA turned out to be *faster* not slower: the −6.5 % parameter shortfall dominates the extra up-projection work at these chunk sizes. ❌ prediction miss, ✅ nice surprise.
 
 ## Verdict
 
-**TBD** — fill in on run completion.
+**Reject** on the strict letter of the pre-declared criterion: val loss Δ = +0.0164 exceeds the +0.015 accept bar by 0.0014. This is *within seed noise* at a single seed — a multi-seed study would be needed to distinguish "marginal reject" from "noise-level null" — but per the project discipline, single-seed results that clearly cross a threshold (even by a hair) aren't upgraded to multi-seed unless they'd plausibly tip the other way, which a flat +0.016 gap across the entire curve will not.
+
+**Keep the code, not the baseline.** `src/gpt_repro/model.py`'s `MLAttention` class and the `attention_type` flag stay on `main`; the config `configs/gpt2_124m_modernplus_mla.py` is preserved for reproducibility. `v0.3-exp03` remains the baseline tag. MLA is **not** promoted.
+
+## Key findings
+
+1. **MLA is slightly faster, not slower, at this chunk sizing.** tok/s went from 178 k → 183 k (**+2.6 %**). Whole-run wall-clock drops 26 min. The pre-run prediction of −2 to −8 % was wrong — the fewer attention params (−6.5 % total) dominate the extra up-projection FLOPs at 124 M scale. This flips the cost/benefit calculus: MLA is a **free speed tweak** if you're willing to absorb a 0.016 val-loss cost.
+2. **The val loss gap is flat across the whole curve.** Unlike Muon's three-phase crossover, MLA just has a consistent ~0.016 offset from step 1500 onward. Interpretation: the model is strictly slightly smaller / less capable across the entire training run, not compensating late.
+3. **Per-parameter efficiency is actually better than MHA.** MLA lost 6.5 % of the parameter count but only 0.55 % of the val-loss improvement over baseline (from 3.040 → 2.981, vs MHA's 3.040 → 2.964). That's a modestly *better* parameter-efficiency ratio.
+4. **The MLA motivation is inference/RL, not pretraining val loss.** This experiment only measures pretraining val loss at 10 B tokens. The actual value of MLA — 5–10× KV-cache compression for long-context generation and RL rollouts — wasn't exercised and can't be rejected by this run.
+
+## Recommendations / follow-ups
+
+1. **Do NOT run a parameter-matched MLA next.** Increasing `d_v=64 → 96` or `d_kv_comp=256 → 384` would parameter-match MHA but moves this experiment from "MLA at DeepSeek-V2-style sizing" to "MLA with arbitrary extra capacity", which isn't a cleaner experiment. If future exp/11 or exp/12 wants parameter-matched MLA, be explicit about the motivation.
+2. **exp/11 candidate: RL-time KV-cache benchmarking.** Load `runs/10-mla/best_val.pt` and `runs/03-modded-tricks/best_val.pt`. Measure generation throughput at contexts 1 024 / 4 096 / 16 384 and batch sizes 1 / 8 / 64. This is where MLA's actual value lives; it's untested after this experiment.
+3. **exp/11 alternative: Differential Transformer (roadmap #08)** or **Native Sparse Attention (#09)**. Both are single-axis quality-first attention changes and haven't been run. Either is a cleaner next step than MLA variants.
+4. **MLA + Muon stacking** — plausible since MLA's attention block has different grad dynamics (narrower bottleneck → stronger per-param signal). Could close the 0.016 gap at zero token cost. Low priority given both alone fell short.
+5. **Don't use MLA as a general-purpose baseline.** It's ~0.016 val loss worse at matched tokens. If you need a more efficient attention, GQA (already rejected at exp/05) is simpler; if you need long-context inference, MLA is still the right call despite this result.
