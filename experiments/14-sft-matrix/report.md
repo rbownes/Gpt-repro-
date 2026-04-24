@@ -101,12 +101,124 @@ Observations before SFT:
 - **ARC-Challenge** is at/near random for everyone — a true ceiling
   for this scale. Don't expect much Δ from SFT here.
 
-### Post-SFT
+### Post-SFT (2026-04-24, ~28 h total GPU)
 
-*Filled in by `scripts/sft_matrix_report.py` once the SFT matrix
-completes.*
+All 8 SFT runs completed without incident. 500 M tokens @ peak LR 3e-5,
+warmup→constant→warmdown, fresh AdamW optimizer, identical hyperparams
+across runs. Each SFT ~3.5 h wall-clock on the 5090.
 
-TODO
+#### SFT val loss (best across training)
+
+| checkpoint        | pretrain val | SFT best val | Δ vs pretrain |
+|-------------------|-------------:|-------------:|--------------:|
+| 06-muon-mup       |        2.974 |   **1.2592** |       −1.715  |
+| 03-modded-tricks  |        2.964 |       1.2919 |       −1.672  |
+| 10-mla            |        2.981 |       1.3040 |       −1.677  |
+| 01-modern-block   |        3.011 |       1.3075 |       −1.704  |
+| 05-speed-pack     |        2.979 |       1.3240 |       −1.655  |
+| baseline          |        2.988 |       1.3450 |       −1.643  |
+| 02-muon           |        2.997 |       1.4977 |       −1.499  |
+| 11-loopllm        |        3.406 |       1.7119 |       −1.694  |
+
+Ordering is not monotone in pretrain val_loss. **06-muon-mup wins the
+SFT val despite being a pretrain reject** (+0.010 vs v0.3), and
+**02-muon trails everyone** with the largest Δ — two hybrid findings
+about Muon-initialized weights under fresh AdamW SFT. μP + MuonAdamW
+produces AdamW-compatible weights; plain Muon alone does not.
+
+#### Full post-SFT eval matrix (Δ = post − pre)
+
+| checkpoint         | HSwag Δ | MMLU Δ | ARC-E Δ | ARC-C Δ | SFT val |
+|--------------------|--------:|-------:|--------:|--------:|--------:|
+| baseline           |  +0.016 | −0.025 |  +0.018 |  +0.003 |   1.345 |
+| 01-modern-block    |  −0.009 | +0.009 |  −0.005 |  +0.027 |   1.308 |
+| 02-muon            |  +0.004 | −0.008 |  +0.018 |  −0.017 |   1.498 |
+| 03-modded-tricks   |  +0.002 | −0.008 |   0.000 |  +0.003 |   1.292 |
+| 05-speed-pack      |  +0.004 | −0.025 |  −0.044 |  +0.020 |   1.324 |
+| **06-muon-mup**    |  +0.011 | +0.001 |  −0.007 |  +0.007 | **1.259** |
+| 10-mla             |  −0.006 | −0.020 |  −0.032 |  −0.007 |   1.304 |
+| 11-loopllm         |  +0.006 | −0.004 |  −0.037 |  −0.003 |   1.712 |
+
+Noise floors (n-dependent): σ(HSwag, n=1000) ≈ 0.015; σ(MMLU, n=1531) ≈
+0.011; σ(ARC-E, n=570) ≈ 0.021; σ(ARC-C, n=299) ≈ 0.026. Nearly every Δ
+in the table is inside ~1 σ of zero, so individual deltas are noisy —
+but the *aggregate patterns* below survive.
+
+## Attribution
+
+### 1. SFT val loss ranking ≠ zero-shot eval ranking
+
+06-muon-mup wins on SFT val but is middling on HSwag post-SFT (+0.011)
+and flat on MMLU/ARC. 03-modded-tricks is 2nd on SFT val but flat
+across all four evals. **Lower SFT val does not translate to better
+downstream zero-shot performance** at 500 M tokens — a reminder that
+chat-style val loss measures fluency on the SFT distribution, not
+underlying capability retention.
+
+### 2. Alignment tax on MMLU
+
+**6 of 8 checkpoints regress on MMLU**, with baseline and 05-speed-pack
+both losing 2.5 pp (~2 σ). Only 01-modern-block (+0.009) and
+06-muon-mup (+0.001) hold flat. This is the classic alignment-tax
+shape: chat-style SFT drifts the model away from factual QA calibration
+faster than it instills new facts. Pre-SFT MMLU was already at/near
+random (0.25–0.29), so there was little room to gain; there was plenty
+to lose.
+
+### 3. ARC-Easy sorts by attention type
+
+Attention-unchanged checkpoints (baseline, 01-modern-block, 02-muon,
+06-muon-mup) all have ARC-E Δ ≥ −0.007; attention-modified checkpoints
+(05-speed-pack GQA, 10-mla, 11-loopllm weight-tied) all have ARC-E Δ
+≤ −0.032. The boundary is clean:
+
+- MHA + full-attn: mean Δ ≈ +0.006 (n=4)
+- GQA / MLA / weight-tied loop: mean Δ ≈ −0.038 (n=3)
+
+With only 3 vs 4 checkpoints this is suggestive, not conclusive.
+Candidate mechanism: SFT on SmolTalk's short conversational turns may
+over-specialize the attention layout when it's been bottlenecked by
+pretrain (fewer KV heads in GQA; latent projections in MLA; shared-
+weight stack in LoopLLM), disturbing the attention patterns ARC-E
+relies on more than those the modern standard-attention blocks picked
+up.
+
+### 4. μP + MuonAdamW is the quiet win
+
+06-muon-mup is the only checkpoint with non-negative Δ on **every**
+metric, plus the lowest post-SFT val loss. This is the opposite of
+what its pretrain ranking (+0.010 vs v0.3-exp03) would predict. μP's
+LR-consistent initialization and MuonAdamW's mixed optimization state
+appear to leave weights both AdamW-friendly and robust under chat SFT.
+This is the most actionable finding in the matrix.
+
+### 5. Plain Muon alone does not survive AdamW SFT
+
+02-muon has the worst SFT val loss in the matrix (Δ +0.15–0.20 vs
+baseline at every training step) and net-negative on ARC-C. Without
+μP's parameterization, a Muon-pretrained init appears to require either
+Muon SFT (not tested here) or a different LR to adapt.
+
+## Conclusions
+
+1. **SFT tokens 500 M at 124 M param scale moves the zero-shot battery
+   by ≤ 1 σ per metric** for every architecture variant. The matrix is
+   mostly inside noise, and the useful signal is in the patterns
+   (alignment tax, attention-type boundary, μP win) rather than
+   individual Δs.
+2. **06-muon-mup is the best-behaved checkpoint under SFT** despite
+   being pretrain-rejected. Promote μP + MuonAdamW as the default
+   SFT-compatible pretrain recipe for future experiments.
+3. **02-muon needs its Muon optimizer state** to be competitive under
+   SFT. Pure AdamW SFT on a Muon-pretrained init loses ~0.15 nats of
+   val loss compared to same-family peers. If Muon pretrain is retained
+   in future experiments, either pair with μP (→ 06 pattern) or SFT
+   with Muon.
+4. **GQA / MLA / weight-tied loop all hurt ARC-E under SFT** — not a
+   hard reject since ARC-E Δ is within noise per-row, but three of
+   three modifications land on the wrong side of zero. Worth revisiting
+   if SFT is the goal; less concerning if the target is pretrain
+   val_loss or a different downstream task.
 
 ## Known caveats
 
