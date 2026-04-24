@@ -109,3 +109,136 @@ def hellaswag(
         total += 1
 
     return EvalResult("hellaswag_acc", correct / max(total, 1), total)
+
+
+# ---------------------------------------------------------------------------
+# MMLU / ARC — 4-way multiple choice via length-normalised LL scoring.
+#
+# Same pattern as HellaSwag: build a prompt, tokenize each candidate answer
+# as a separate continuation, and pick max mean-log-likelihood. All three
+# eval functions share a small helper that accepts a stream of multiple-
+# choice examples.
+# ---------------------------------------------------------------------------
+
+
+def _score_multiple_choice(
+    model: torch.nn.Module,
+    prompt_text: str,
+    choices: list[str],
+    *,
+    amp_dtype: torch.dtype,
+    device: torch.device | str,
+) -> int:
+    """Return the index of the highest-scoring choice."""
+    ctx_ids = encode(prompt_text)
+    scores: list[float] = []
+    for choice in choices:
+        end_ids = encode(" " + choice.strip())
+        if not end_ids:
+            scores.append(-float("inf"))
+            continue
+        scores.append(_score_continuation(model, ctx_ids, end_ids, device, amp_dtype))
+    return int(np.argmax(scores))
+
+
+@torch.no_grad()
+def mmlu(
+    model: torch.nn.Module,
+    *,
+    amp_dtype: torch.dtype,
+    subset: str = "all",
+    split: str = "validation",
+    limit: int | None = None,
+) -> EvalResult:
+    """Zero-shot MMLU accuracy (length-normalised LL over the 4 choices).
+
+    Uses `cais/mmlu`. Each row has `question`, `choices` (list of 4 strings),
+    and `answer` (int index 0..3). Prompt format:
+
+        {question}
+        Answer:
+
+    Each candidate answer is tokenised as " {choice}" and scored.
+    """
+    from datasets import load_dataset  # type: ignore
+
+    ds = load_dataset("cais/mmlu", subset, split=split)
+    if limit is not None:
+        ds = ds.select(range(min(limit, len(ds))))
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    correct = 0
+    total = 0
+    for ex in ds:
+        prompt = f"{ex['question'].strip()}\nAnswer:"
+        pred = _score_multiple_choice(model, prompt, list(ex["choices"]),
+                                      amp_dtype=amp_dtype, device=device)
+        correct += int(pred == int(ex["answer"]))
+        total += 1
+
+    return EvalResult(f"mmlu_{subset}_acc", correct / max(total, 1), total,
+                      extra={"split": split})
+
+
+def _arc_eval(
+    model: torch.nn.Module,
+    config: str,
+    *,
+    amp_dtype: torch.dtype,
+    split: str,
+    limit: int | None,
+) -> EvalResult:
+    from datasets import load_dataset  # type: ignore
+
+    ds = load_dataset("allenai/ai2_arc", config, split=split)
+    if limit is not None:
+        ds = ds.select(range(min(limit, len(ds))))
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    correct = 0
+    total = 0
+    for ex in ds:
+        prompt = f"Question: {ex['question'].strip()}\nAnswer:"
+        labels = list(ex["choices"]["label"])
+        texts = list(ex["choices"]["text"])
+        answer_key = str(ex["answerKey"]).strip()
+        if answer_key not in labels:
+            # A handful of ARC rows have stray answer keys (e.g. "1" vs label "A").
+            # Skip rather than guess.
+            continue
+        gold = labels.index(answer_key)
+        pred = _score_multiple_choice(model, prompt, texts,
+                                      amp_dtype=amp_dtype, device=device)
+        correct += int(pred == gold)
+        total += 1
+
+    name = "arc_easy_acc" if config == "ARC-Easy" else "arc_challenge_acc"
+    return EvalResult(name, correct / max(total, 1), total, extra={"split": split})
+
+
+@torch.no_grad()
+def arc_easy(
+    model: torch.nn.Module,
+    *,
+    amp_dtype: torch.dtype,
+    split: str = "validation",
+    limit: int | None = None,
+) -> EvalResult:
+    """Zero-shot ARC-Easy accuracy."""
+    return _arc_eval(model, "ARC-Easy", amp_dtype=amp_dtype, split=split, limit=limit)
+
+
+@torch.no_grad()
+def arc_challenge(
+    model: torch.nn.Module,
+    *,
+    amp_dtype: torch.dtype,
+    split: str = "validation",
+    limit: int | None = None,
+) -> EvalResult:
+    """Zero-shot ARC-Challenge accuracy."""
+    return _arc_eval(model, "ARC-Challenge", amp_dtype=amp_dtype, split=split, limit=limit)
