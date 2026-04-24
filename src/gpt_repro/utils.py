@@ -106,6 +106,35 @@ def load_checkpoint(
     return ckpt
 
 
+def load_gpt_config_from_ckpt(ckpt: dict[str, Any]) -> "GPTConfig":
+    """Rebuild a GPTConfig from `ckpt['config']`, tolerating schema drift.
+
+    Different pretrain checkpoints in this repo were saved against different
+    revisions of GPTConfig (exp/02 predates `u_net_skips`, exp/05 added
+    `n_kv_head`, exp/06 added μP fields in TrainConfig, etc.). Unknown fields
+    in the saved dict are dropped with a warning; missing fields inherit the
+    current-default value from the live `GPTConfig` dataclass.
+
+    `ckpt['config']` may be a dataclass, dict, or `GPTConfig` instance.
+    """
+    from gpt_repro.model import GPTConfig  # local import to avoid circular
+    saved = ckpt["config"]
+    if is_dataclass(saved):
+        saved_dict = asdict(saved)
+    elif isinstance(saved, dict):
+        saved_dict = dict(saved)
+    elif hasattr(saved, "__dict__"):
+        saved_dict = dict(saved.__dict__)
+    else:
+        raise TypeError(f"Can't convert ckpt['config'] of type {type(saved)!r} to dict")
+    known = set(GPTConfig.__dataclass_fields__)
+    ignored = sorted(k for k in saved_dict if k not in known)
+    if ignored:
+        print(f"[load_gpt_config_from_ckpt] dropping unknown fields: {ignored}")
+    kept = {k: v for k, v in saved_dict.items() if k in known}
+    return GPTConfig(**kept)
+
+
 def rotate_checkpoints(dir_: str | Path, keep_last: int) -> None:
     d = Path(dir_)
     ckpts = sorted(d.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
