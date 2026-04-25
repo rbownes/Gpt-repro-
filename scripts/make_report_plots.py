@@ -172,6 +172,141 @@ def fig_rl_trajectory(out_dir: Path) -> None:
     plt.close()
 
 
+# ---------------------------------------------------------------------------
+# Per-step training curves (one line per checkpoint, coloured by experiment)
+# ---------------------------------------------------------------------------
+
+# Categorical palette — 8 visually distinct colors, one per ckpt.
+PALETTE = {
+    "baseline":          "#1f77b4",  # blue
+    "01-modern-block":   "#ff7f0e",  # orange
+    "02-muon":           "#d62728",  # red
+    "03-modded-tricks":  "#2ca02c",  # green
+    "05-speed-pack":     "#9467bd",  # purple
+    "06-muon-mup":       "#8c564b",  # brown
+    "10-mla":            "#e377c2",  # pink
+    "11-loopllm":        "#17becf",  # cyan
+}
+
+
+def _smooth(xs: list[float], window: int = 50) -> list[float]:
+    """Simple moving-average smoothing for jittery training-loss curves."""
+    if window <= 1 or len(xs) < window:
+        return xs
+    out = []
+    s = 0.0
+    for i, v in enumerate(xs):
+        s += v
+        if i >= window:
+            s -= xs[i - window]
+            out.append(s / window)
+        else:
+            out.append(s / (i + 1))
+    return out
+
+
+def _curve_from_jsonl(path: Path, event: str, key: str) -> tuple[list[int], list[float]]:
+    """Pull (step, value) tuples for a given event/key from a metrics.jsonl."""
+    if not path.exists():
+        return [], []
+    steps, vals = [], []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("event") == event and key in d and "step" in d:
+            steps.append(int(d["step"]))
+            vals.append(float(d[key]))
+    return steps, vals
+
+
+def fig_pretrain_curves(out_dir: Path) -> None:
+    """Pretrain val_loss vs step, one line per ckpt."""
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for ckpt in CKPTS:
+        steps, vals = _curve_from_jsonl(
+            Path(f"runs/{ckpt}/metrics.jsonl"), "eval", "val_loss",
+        )
+        if not steps:
+            continue
+        ax.plot(steps, vals, label=ckpt, color=PALETTE[ckpt], linewidth=1.5, alpha=0.9)
+    ax.set_xlabel("pretrain step (524k tokens/step × 19,073 steps = 10B tokens)")
+    ax.set_ylabel("val loss")
+    ax.set_title("Stage 1 — pretraining: val loss vs step (lower = better)")
+    ax.legend(loc="upper right", ncol=2, fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(2.7, 6.5)  # crop early high-loss spike
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_curves_pretrain.png", dpi=120)
+    plt.close()
+
+
+def fig_sft_curves(out_dir: Path) -> None:
+    """SFT val_loss vs step, one line per ckpt."""
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for ckpt in CKPTS:
+        steps, vals = _curve_from_jsonl(
+            Path(f"runs/sft-{ckpt}/metrics.jsonl"), "eval", "val_loss",
+        )
+        if not steps:
+            continue
+        ax.plot(steps, vals, label=ckpt, color=PALETTE[ckpt], linewidth=1.5, alpha=0.9)
+    ax.set_xlabel("SFT step (65k tokens/step × 7,629 steps = 500M SmolTalk tokens)")
+    ax.set_ylabel("val loss")
+    ax.set_title("Stage 2 — SFT: val loss vs step (lower = better)")
+    ax.legend(loc="upper right", ncol=2, fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_curves_sft.png", dpi=120)
+    plt.close()
+
+
+def fig_rl_curves(out_dir: Path) -> None:
+    """RL eval reward vs step, one line per ckpt — the post-training accuracy curve."""
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for ckpt in CKPTS:
+        steps, vals = _curve_from_jsonl(
+            Path(f"runs/rl-{ckpt}/metrics.jsonl"), "eval", "eval_reward",
+        )
+        if not steps:
+            continue
+        ax.plot(steps, vals, label=ckpt, color=PALETTE[ckpt], linewidth=1.5, alpha=0.9)
+    ax.set_xlabel("RL step (32 rollouts/step × 500 steps)")
+    ax.set_ylabel("eval reward (= accuracy on held-out 64-prompt MC subset)")
+    ax.set_title("Stage 3 — RL: eval reward vs step (higher = better)")
+    ax.legend(loc="lower right", ncol=2, fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_curves_rl.png", dpi=120)
+    plt.close()
+
+
+def fig_rl_train_loss(out_dir: Path) -> None:
+    """RL train loss vs step (smoothed), one line per ckpt — companion to fig_curves_rl."""
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for ckpt in CKPTS:
+        steps, vals = _curve_from_jsonl(
+            Path(f"runs/rl-{ckpt}/metrics.jsonl"), "train_step", "loss",
+        )
+        if not steps:
+            continue
+        ax.plot(steps, _smooth(vals, window=20), label=ckpt,
+                color=PALETTE[ckpt], linewidth=1.2, alpha=0.85)
+    ax.set_xlabel("RL step")
+    ax.set_ylabel("GRPO loss (smoothed window=20, can be ±)")
+    ax.set_title("Stage 3 — RL: GRPO loss vs step (smoothed)")
+    ax.axhline(0, color="black", linewidth=0.5)
+    ax.legend(loc="upper right", ncol=2, fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_curves_rl_loss.png", dpi=120)
+    plt.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--matrix", default="experiments/15-rl-matrix/master_matrix.json")
@@ -187,7 +322,11 @@ def main() -> int:
     fig_delta_rl(rows, out_dir)
     fig_ll_vs_gen_gap(rows, out_dir)
     fig_rl_trajectory(out_dir)
-    print(f"wrote 5 PNGs under {out_dir}")
+    fig_pretrain_curves(out_dir)
+    fig_sft_curves(out_dir)
+    fig_rl_curves(out_dir)
+    fig_rl_train_loss(out_dir)
+    print(f"wrote 9 PNGs under {out_dir}")
     return 0
 
 

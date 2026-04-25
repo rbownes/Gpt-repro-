@@ -938,6 +938,46 @@ with binary-letter reward + 500 steps).
 
 ---
 
+## 6.b Training curves per stage
+
+Per-step trajectories for every checkpoint, coloured by experiment.
+Same legend across all four figures: blue = baseline, orange =
+01-modern-block, red = 02-muon, green = 03-modded-tricks, purple =
+05-speed-pack, brown = 06-muon-mup, pink = 10-mla, cyan = 11-loopllm.
+
+### Stage 1 — pretraining val loss (10 B FineWeb-Edu tokens)
+
+![Pretrain val loss curves per ckpt](RETROSPECTIVE_assets/fig_curves_pretrain.png)
+
+- Six 124 M variants converge to a tight band ≈ 2.96 – 3.04 by step 19,073.
+- 11-loopllm (cyan, 45 M effective params) plateaus visibly higher (~3.41) — capacity gap, not a transient.
+- 02-muon (red) and 06-muon-mup (brown) lead the early descent — Muon's "time-to-target" win is real, but AdamW catches up by 10 B tokens.
+
+### Stage 2 — SFT val loss (500 M SmolTalk tokens)
+
+![SFT val loss curves per ckpt](RETROSPECTIVE_assets/fig_curves_sft.png)
+
+- 11-loopllm (cyan) runs as a clear top band (~1.7) — capacity bottleneck again.
+- 02-muon (red) sits as a separate middle band (~1.5) — Muon-pretrained weights adapting poorly to fresh AdamW SFT.
+- The other six 124 M ckpts pack into a 0.05-wide band at the bottom (~1.26 – 1.34) by step 7,629; ranking reshuffles between pretraining and SFT.
+
+### Stage 3 — RL eval reward (held-out 64-prompt MC subset)
+
+![RL eval reward curves per ckpt](RETROSPECTIVE_assets/fig_curves_rl.png)
+
+- High variance (the held-out eval is only 64 prompts; σ ≈ 0.06 binomial).
+- All 8 ckpts converge to the same 0.20 – 0.40 oscillation band by step 500 — the matrix-collapse signature.
+- The shattered cluster (02-muon = red, 11-loopllm = cyan) starts visibly lower (~0.10) and catches up around step 200.
+
+### Stage 3 (companion) — RL training loss (smoothed window=20)
+
+![RL training loss curves per ckpt](RETROSPECTIVE_assets/fig_curves_rl_loss.png)
+
+- GRPO loss oscillates around 0 (PPO-clipped objective + KL penalty); negative loss = positive policy gradient + small KL.
+- 02-muon (red) and 11-loopllm (cyan) show the largest negative loss spikes — these are the moments where the policy is making large directional updates to escape the shattered-format basin.
+
+---
+
 ## 7. Master matrix
 
 The single source-of-truth artefact: every metric per checkpoint per
