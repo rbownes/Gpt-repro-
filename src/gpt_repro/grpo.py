@@ -81,13 +81,22 @@ def compute_grpo_loss(
     for i, s in enumerate(seqs):
         inp_full[i, : len(s)] = torch.tensor(s, dtype=torch.long, device=device)
 
-    # forward over inp[:, :-1] → predict tgt = inp[:, 1:]
-    inp = inp_full[:, :-1]
-    tgt = inp_full[:, 1:]
+    # forward over inp[:, :-1] → predict tgt = inp[:, 1:].
+    # Pass `tgt` so the model returns full-sequence logits (without targets
+    # it returns only the last-position logit — the inference fast-path).
+    # `.contiguous()` because B>1 col-slicing yields a non-contiguous view
+    # and `model.forward` does `targets.view(-1)` internally.
+    inp = inp_full[:, :-1].contiguous()
+    tgt = inp_full[:, 1:].contiguous()
     with torch.autocast(device_type=device.type, dtype=amp_dtype):
-        logits, _ = policy(inp)
-    logp = F.log_softmax(logits.float(), dim=-1)            # (B, T-1, V)
-    logp_new = logp.gather(-1, tgt[:, :, None]).squeeze(-1)  # (B, T-1)
+        logits, _ = policy(inp, tgt)
+    # Compute log P(tgt | inp) at every position WITHOUT materialising the
+    # full (B, T-1, V) log-softmax tensor — that intermediate is several GB
+    # at our prompt lengths and trips OOM. logsumexp is max-shifted so it's
+    # stable in bf16; we only upcast the scalar-per-position result.
+    gathered = logits.gather(-1, tgt[:, :, None]).squeeze(-1)  # (B, T-1)
+    lse = torch.logsumexp(logits, dim=-1)                       # (B, T-1)
+    logp_new = (gathered - lse).float()                         # (B, T-1) fp32
 
     # ---- Mask + scatter old/ref logps ----------------------------------
     T_minus_1 = max_len - 1

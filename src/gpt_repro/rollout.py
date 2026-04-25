@@ -93,15 +93,19 @@ def _score_rollout(
         return torch.empty(0)
     device = next(model.parameters()).device
     full = torch.tensor([prompt_ids + gen_ids], dtype=torch.long, device=device)
-    inp = full[:, :-1]
-    tgt = full[:, 1:]
+    inp = full[:, :-1].contiguous()
+    tgt = full[:, 1:].contiguous()
+    # Pass `tgt` so model returns full-sequence logits (without targets it
+    # only returns the last position — the inference fast-path).
     with torch.autocast(device_type=inp.device.type, dtype=amp_dtype):
-        logits, _ = model(inp)
-    logp = F.log_softmax(logits.float(), dim=-1)            # (1, T-1, V)
+        logits, _ = model(inp, tgt)
+    # Memory-frugal log-prob: gather + logsumexp instead of full log-softmax,
+    # so we never materialise the (1, T-1, V) fp32 tensor.
+    gathered = logits.gather(-1, tgt[:, :, None]).squeeze(-1)   # (1, T-1)
+    lse = torch.logsumexp(logits, dim=-1)                       # (1, T-1)
+    logp_full = (gathered - lse).float()                        # (1, T-1)
     n_gen = len(gen_ids)
-    gen_tgt = tgt[0, -n_gen:]                                # (n_gen,)
-    gen_logp_full = logp[0, -n_gen:, :]                      # (n_gen, V)
-    return gen_logp_full.gather(-1, gen_tgt[:, None]).squeeze(-1).cpu()
+    return logp_full[0, -n_gen:].cpu()
 
 
 def generate_group(

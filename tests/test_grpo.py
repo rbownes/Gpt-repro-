@@ -187,6 +187,44 @@ def test_grpo_loss_skips_zero_variance_groups() -> None:
     )
 
 
+def test_grpo_loss_handles_multi_token_generations() -> None:
+    """Regression test: scoring a rollout with more than one generated
+    token must not collapse to last-position logits. The model's forward
+    returns full-sequence logits only when targets are passed; both
+    `_score_rollout` and `compute_grpo_loss` must do that."""
+    policy = _make_tiny_gpt(seed=3)
+    ref = copy.deepcopy(policy).eval()
+    for p in ref.parameters():
+        p.requires_grad_(False)
+
+    rollouts = _collect_rollouts(
+        policy, ref,
+        prompt_ids=[PROMPT_TOKEN],
+        n_groups=1, group_size=4,
+        max_new_tokens=4,        # the multi-token case that exercises the bug
+    )
+    # Force non-zero variance in the group so the policy gradient term is
+    # non-degenerate.
+    for i, r in enumerate(rollouts):
+        r.reward = float(i % 2)
+        # Per-token logps must have one entry per generated token.
+        assert r.logp_old.numel() == len(r.gen_ids), (
+            f"logp_old length {r.logp_old.numel()} != gen_ids length {len(r.gen_ids)}"
+        )
+        assert r.logp_ref.numel() == len(r.gen_ids), (
+            f"logp_ref length {r.logp_ref.numel()} != gen_ids length {len(r.gen_ids)}"
+        )
+
+    out = compute_grpo_loss(
+        policy, rollouts, group_size=4,
+        clip_eps=0.2, kl_coef=0.04, amp_dtype=torch.float32,
+    )
+    assert torch.isfinite(out["loss"])
+    assert out["n_tokens"].item() > 1, (
+        f"expected multi-token loss reduction, got n_tokens={out['n_tokens']}"
+    )
+
+
 def test_grpo_loss_assertions() -> None:
     """compute_grpo_loss rejects bad inputs."""
     policy = _make_tiny_gpt(seed=2)
