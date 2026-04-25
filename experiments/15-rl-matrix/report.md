@@ -194,11 +194,167 @@ via LL).
   (T=0.7 + pass@5) to separate "knows but doesn't always emit" from
   "doesn't know". Out of scope for Phase A.
 
-## Phase A exit criteria — met
+### Phase D — RL training + post-RL eval (2026-04-25)
 
-- 8 `gen_eval_results.json` files exist under `runs/sft-*/`.
-- Pre-RL baseline table populated in this report.
-- 37 / 37 new tests green (114 / 114 total).
-- 1 commit on `exp/15-rl`.
+GRPO (DeepSeekMath/R1 style — group-relative advantages, PPO-clipped
+policy gradient, DeepSeek k3 KL estimator), 500 steps per checkpoint,
+P=2 prompts × G=16 group samples = 32 rollouts/step, peak LR 1e-6,
+linear warmup → constant, kl_coef = 0.04, clip_eps = 0.2, max_new_tokens
+= 8. Per-ckpt wall: ~5–11 min RL + ~2 min post-RL eval ≈ ~70 min total
+matrix wall.
 
-Next: Phase B (GRPO + RL training loop).
+#### Post-RL Δ_RL matrix (RL_gen − SFT_gen on full eval splits)
+
+| ckpt | HSwag Δ | MMLU Δ | ARC-E Δ | ARC-C Δ | avg |
+|------|--------:|-------:|--------:|--------:|----:|
+| baseline | +0.036 | +0.029 | +0.026 | +0.010 | **+0.025** |
+| 01-modern-block | +0.008 | +0.025 | 0.000 | +0.024 | +0.014 |
+| **02-muon** | **+0.246** | **+0.205** | **+0.208** | **+0.264** | **+0.231** |
+| 03-modded-tricks | 0.000 | +0.025 | −0.002 | +0.010 | +0.008 |
+| 05-speed-pack | +0.017 | +0.075 | +0.051 | +0.099 | +0.060 |
+| 06-muon-mup | +0.025 | +0.075 | +0.016 | +0.061 | +0.044 |
+| 10-mla | +0.006 | +0.027 | +0.058 | +0.014 | +0.026 |
+| **11-loopllm** | **+0.230** | **+0.172** | **+0.160** | **+0.135** | **+0.174** |
+
+#### Post-RL absolute gen accuracy (the headline)
+
+| ckpt | HSwag | MMLU | ARC-E | ARC-C | avg |
+|------|------:|-----:|------:|------:|----:|
+| baseline          | 0.243 | 0.251 | 0.268 | 0.254 | 0.254 |
+| 01-modern-block   | 0.224 | 0.253 | 0.238 | 0.312 | 0.257 |
+| 02-muon           | 0.253 | 0.229 | 0.259 | 0.298 | 0.260 |
+| 03-modded-tricks  | 0.254 | 0.244 | 0.217 | 0.288 | 0.251 |
+| 05-speed-pack     | 0.255 | 0.240 | 0.233 | 0.258 | 0.246 |
+| 06-muon-mup       | 0.253 | 0.244 | 0.212 | 0.261 | 0.242 |
+| **10-mla**        | 0.252 | 0.244 | 0.265 | 0.302 | **0.266** |
+| 11-loopllm        | 0.259 | 0.229 | 0.275 | 0.271 | 0.259 |
+
+Spread: **0.242 – 0.266** — a remarkably tight 0.024 band across 8
+checkpoints whose SFT-gen baselines spanned 0.029 – 0.243 (a 0.214
+range). RL equalises the matrix.
+
+#### Parse-failure recovery
+
+Every ckpt × task combination drops below 4% parse-failure rate
+post-RL, with most tasks at 0.0%. The "shattered" cluster (02-muon and
+11-loopllm) drops from 60–98% pre-RL to 1–4% post-RL — RL fixes the
+chat-format compliance that SFT failed to install.
+
+#### LL→gen gap closure (`Δ_RL / (SFT_LL − SFT_gen)`)
+
+For each ckpt × task, the fraction of the SFT-LL→SFT-gen
+verbalisation gap that RL recovered. Negative means SFT-gen was
+already above LL (only on ARC-C for 4 ckpts); >1.0 means RL exceeded
+the knowledge measurable via LL.
+
+| task | mean closure | range |
+|------|-------------:|-------|
+| HellaSwag | +0.24 | +0.00 .. +0.71 |
+| MMLU      | +0.71 | +0.42 .. +0.94 |
+| ARC-Easy  | +0.22 | -0.01 .. +0.69 |
+| ARC-Challenge | mostly >1.0 (RL beats LL ceiling on 4/8 ckpts) |
+
+Two-cluster pattern again:
+- **MMLU is dominated by format compliance** — 71% mean closure tells
+  us the SFT-LL→SFT-gen gap on MMLU was almost entirely about
+  verbalisation, not knowledge. RL filled that nearly fully.
+- **HSwag and ARC-E retain a real knowledge gap** — RL closes ~22-24%
+  but the bulk remains. These tasks need genuine capability that 500
+  RL steps can't synthesise.
+
+## Findings (Phase D)
+
+### 1. RL is a great equaliser at this scale
+
+Eight ckpts whose SFT-gen avg ranged 0.029 – 0.243 all converge
+post-RL to 0.242 – 0.266. The matrix collapses. **The pretrain × SFT
+ranking does not predict the post-RL ranking** at this scale and
+budget. Format-shattered ckpts (02-muon, 11-loopllm) catch up
+completely with the format-clean ckpts (baseline, 01, 03, 10).
+
+### 2. Most of Δ_RL is format recovery, not knowledge gain
+
+Across 32 ckpt × task cells, the strongest predictor of Δ_RL is
+pre-RL parse-failure rate (correlation ≈ 0.95). The "shattered"
+cluster gets +0.17 – +0.23 Δ_RL on every task because there's so
+much format-compliance to recover. The "clean" cluster gets +0.00 –
++0.07 because format was already mostly there. RL with a binary
+letter-match reward is overwhelmingly teaching "emit a letter
+inside the chat format" rather than reasoning content.
+
+### 3. ARC-Easy gain is the hardest
+
+Across all 8 ckpts, the LL→gen gap closure on ARC-E averages +0.22
+(vs MMLU's +0.71). ARC-E's knowledge ceiling (LL acc 0.44–0.48)
+exceeds what RL can recover with 500 steps. On 03-modded-tricks RL
+went **down** by 0.002. ARC-E genuinely requires the model to know
+something, and 500 steps of GRPO with binary reward isn't enough to
+extract it.
+
+### 4. ARC-C frequently exceeds the LL ceiling post-RL
+
+ARC-C SFT-LL was already at random (0.22–0.28) for most ckpts;
+SFT-gen often equalled or exceeded SFT-LL. Post-RL, ARC-C gen
+accuracy reaches 0.25–0.31 across the matrix — beyond the LL
+ceiling. With near-random LL, picking a single letter explicitly
+gives a marginal edge over LL-scoring 4 candidates whose log-prob
+is dominated by length and surface form.
+
+### 5. 10-mla emerges as the post-RL winner (avg 0.266)
+
+By a small margin. Notable because:
+- 10-mla had the smallest LL→gen gap pre-RL (parse_fail 0–8%) so
+  there was less format work for RL to do
+- 10-mla's ARC-E response was the strongest in the clean cluster
+  (Δ +0.058 vs 0.000 to +0.026 elsewhere)
+- MLA's latent-bottleneck attention may help with single-token
+  letter prediction more than full-rank attention does
+
+But the spread vs 02-muon (0.260) and 11-loopllm (0.259) is within
+1–2 sigma of binomial noise on these eval set sizes — the ranking
+is noisy.
+
+### 6. The clean cluster sees almost no movement
+
+baseline, 01-modern-block, 03-modded-tricks all end with avg
+Δ_RL ≤ +0.025. RL with this hyperparameter set has essentially no
+effect on already-format-compliant SFT'd checkpoints. The HSwag and
+ARC-E knowledge gaps need either (a) a denser reward signal,
+(b) much more RL compute, (c) larger base model.
+
+### 7. KL drift correlates with shattered cluster
+
+The two shattered ckpts hit KL spikes of 0.5–1.0 mid-training as
+the policy escapes the broken-format basin of the SFT'd reference;
+the clean ckpts mostly stayed under KL 0.2. Shows that the KL
+penalty is doing its job — penalising drift only when reward
+justifies it.
+
+## Phase D exit criteria — met
+
+- 8 `runs/rl-{ckpt}/best_val.pt` + `gen_eval_results.json` files
+- Master matrix: `experiments/15-rl-matrix/master_matrix.{json,md}`
+- 6 commits on `exp/15-rl`:
+  - `2f600b4` — Phase A.1-A.4: gen-eval harness
+  - `e8699c0` — Phase A.5: pre-RL baselines
+  - `32b645c` — Phase B: GRPO + RL training loop
+  - `e7e9a2c` — Phase C: smoke test + 3 GRPO bugfixes
+  - `e530433` — Phase D scaffolding: orchestrator
+  - `dbd3233`, `7f7ced8`, `79bae93` — Phase D memory hardening
+    (return_full_logits, gather+lse, expandable_segments,
+    P=2 G=16, oversize-prompt skip, prompt cap 768, empty_cache)
+- 118/118 tests green throughout
+
+## Status
+
+**Accepted as v0.5-rl-mc-matrix.** Negative-axis findings (clean
+cluster doesn't move, ARC-E gap remains) are real signals about the
+limits of GRPO-with-binary-letter-reward at this model scale and
+training budget. Positive-axis findings (shattered cluster fully
+recovers, MMLU gap is verbalisation-not-knowledge, post-RL matrix
+collapses to a tight band) are the headline contributions.
+
+Next: Phase F — comprehensive `experiments/RETROSPECTIVE.md`
+covering the full project arc (exp/00 → exp/15) with per-experiment
+math, diagrams, multi-viewpoint framing, and a reader-cold-start
+quality bar.

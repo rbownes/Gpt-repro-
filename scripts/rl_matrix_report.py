@@ -1,0 +1,178 @@
+"""Aggregate exp/15 RL matrix into master_matrix.{json,md}.
+
+Reads (per checkpoint) up to 5 artefacts:
+    runs/{ckpt}/results.json              — pretrain val_loss + tok/s
+    runs/{ckpt}/eval_results.json         — pre-SFT LL battery
+    runs/sft-{ckpt}/eval_results.json     — post-SFT LL battery
+    runs/sft-{ckpt}/gen_eval_results.json — pre-RL generative
+    runs/rl-{ckpt}/gen_eval_results.json  — post-RL generative
+
+Writes:
+    experiments/15-rl-matrix/master_matrix.json — every metric per ckpt
+    experiments/15-rl-matrix/master_matrix.md   — markdown comparison
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+CHECKPOINTS = [
+    "baseline", "01-modern-block", "02-muon", "03-modded-tricks",
+    "05-speed-pack", "06-muon-mup", "10-mla", "11-loopllm",
+]
+
+LL_TASKS = ["hellaswag_acc", "mmlu_all_acc", "arc_easy_acc", "arc_challenge_acc"]
+GEN_TASKS = ["hellaswag_gen_acc", "mmlu_all_gen_acc", "arc_easy_gen_acc", "arc_challenge_gen_acc"]
+TASK_LABELS = ["hswag", "mmlu", "arc_e", "arc_c"]
+
+
+def read_json(p: Path) -> dict | None:
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError as e:
+        print(f"[warn] {p}: {e}", file=sys.stderr)
+        return None
+
+
+def get_metric(payload: dict | None, name: str, key: str = "value") -> float | None:
+    if payload is None:
+        return None
+    results = payload.get("results", payload) if isinstance(payload, dict) else payload
+    if isinstance(results, list):
+        for r in results:
+            if r.get("metric") == name:
+                v = r.get(key)
+                return float(v) if v is not None else None
+    return None
+
+
+def get_parse_fail(payload: dict | None, name: str) -> float | None:
+    if payload is None:
+        return None
+    results = payload.get("results", payload) if isinstance(payload, dict) else payload
+    if isinstance(results, list):
+        for r in results:
+            if r.get("metric") == name:
+                extra = r.get("extra") or {}
+                pf = extra.get("parse_failure_rate")
+                return float(pf) if pf is not None else None
+    return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out-json", default="experiments/15-rl-matrix/master_matrix.json")
+    ap.add_argument("--out-md", default="experiments/15-rl-matrix/master_matrix.md")
+    args = ap.parse_args()
+
+    rows = []
+    for ckpt in CHECKPOINTS:
+        pretrain = read_json(Path(f"runs/{ckpt}/results.json"))
+        pre_ll = read_json(Path(f"runs/{ckpt}/eval_results.json"))
+        sft_ll = read_json(Path(f"runs/sft-{ckpt}/eval_results.json"))
+        sft_gen = read_json(Path(f"runs/sft-{ckpt}/gen_eval_results.json"))
+        rl_gen = read_json(Path(f"runs/rl-{ckpt}/gen_eval_results.json"))
+
+        row: dict = {"checkpoint": ckpt}
+        if isinstance(pretrain, dict):
+            row["pretrain_val_loss"] = pretrain.get("val_loss")
+            row["pretrain_tok_per_s"] = pretrain.get("median_tok_per_s")
+
+        for ll_name, gen_name, label in zip(LL_TASKS, GEN_TASKS, TASK_LABELS):
+            pre_ll_v = get_metric(pre_ll, ll_name)
+            sft_ll_v = get_metric(sft_ll, ll_name)
+            sft_gen_v = get_metric(sft_gen, gen_name)
+            rl_gen_v = get_metric(rl_gen, gen_name)
+            sft_gen_pf = get_parse_fail(sft_gen, gen_name)
+            rl_gen_pf = get_parse_fail(rl_gen, gen_name)
+            row[f"{label}_pre_ll"] = pre_ll_v
+            row[f"{label}_sft_ll"] = sft_ll_v
+            row[f"{label}_sft_gen"] = sft_gen_v
+            row[f"{label}_rl_gen"] = rl_gen_v
+            row[f"{label}_delta_rl"] = (
+                rl_gen_v - sft_gen_v if (rl_gen_v is not None and sft_gen_v is not None) else None
+            )
+            row[f"{label}_sft_pf"] = sft_gen_pf
+            row[f"{label}_rl_pf"] = rl_gen_pf
+            # "ceiling closed" — fraction of (LL_ceiling - sft_gen) that RL closed
+            if sft_ll_v is not None and sft_gen_v is not None and rl_gen_v is not None:
+                gap = sft_ll_v - sft_gen_v
+                if abs(gap) > 1e-6:
+                    row[f"{label}_gap_closed_frac"] = (rl_gen_v - sft_gen_v) / gap
+                else:
+                    row[f"{label}_gap_closed_frac"] = None
+            else:
+                row[f"{label}_gap_closed_frac"] = None
+        rows.append(row)
+
+    out_json = Path(args.out_json)
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps({"rows": rows, "tasks": TASK_LABELS}, indent=2))
+    print(f"wrote {out_json}")
+
+    # ---- Master matrix MD -------------------------------------------------
+    def fmt(v, fmt_str="{:+.3f}", default="—"):
+        if v is None:
+            return default
+        return fmt_str.format(v)
+
+    lines: list[str] = []
+    lines.append("# exp/15 master matrix\n")
+    lines.append("Generated by `scripts/rl_matrix_report.py`. Pre-SFT LL is the")
+    lines.append("knowledge ceiling; SFT-gen is post-SFT generative pass rate;")
+    lines.append("RL-gen is post-RL generative pass rate; Δ_RL = RL-gen − SFT-gen;")
+    lines.append("`gap_closed` = Δ_RL / (SFT-LL − SFT-gen) — fraction of the")
+    lines.append("SFT-LL→SFT-gen verbalisation gap that RL recovered (>1.0 means")
+    lines.append("RL exceeded the knowledge measurable via LL).\n")
+
+    # Per-task table
+    for ll_name, gen_name, label in zip(LL_TASKS, GEN_TASKS, TASK_LABELS):
+        title = label.upper()
+        lines.append(f"\n## {title}\n")
+        lines.append("| ckpt | SFT LL | SFT gen | RL gen | Δ_RL | gap closed | parse_fail SFT→RL |")
+        lines.append("|------|-------:|--------:|-------:|-----:|-----------:|-------------------|")
+        for row in rows:
+            sft_ll_v = row.get(f"{label}_sft_ll")
+            sft_gen_v = row.get(f"{label}_sft_gen")
+            rl_gen_v = row.get(f"{label}_rl_gen")
+            delta = row.get(f"{label}_delta_rl")
+            gap = row.get(f"{label}_gap_closed_frac")
+            sft_pf = row.get(f"{label}_sft_pf")
+            rl_pf = row.get(f"{label}_rl_pf")
+            pf_str = f"{fmt(sft_pf, '{:.2f}')} → {fmt(rl_pf, '{:.2f}')}"
+            lines.append(
+                f"| {row['checkpoint']} | {fmt(sft_ll_v, '{:.3f}')} | "
+                f"{fmt(sft_gen_v, '{:.3f}')} | {fmt(rl_gen_v, '{:.3f}')} | "
+                f"{fmt(delta)} | {fmt(gap, '{:+.2f}')} | {pf_str} |"
+            )
+
+    # Headline (compact 4-col)
+    lines.append("\n\n## Headline (compact)\n")
+    lines.append("| ckpt | SFT-gen avg | RL-gen avg | Δ_RL avg |")
+    lines.append("|------|------------:|-----------:|---------:|")
+    for row in rows:
+        sft_avg = [row.get(f"{l}_sft_gen") for l in TASK_LABELS]
+        rl_avg = [row.get(f"{l}_rl_gen") for l in TASK_LABELS]
+        sft_avg = [v for v in sft_avg if v is not None]
+        rl_avg = [v for v in rl_avg if v is not None]
+        if sft_avg and rl_avg:
+            sa = sum(sft_avg) / len(sft_avg)
+            ra = sum(rl_avg) / len(rl_avg)
+            lines.append(
+                f"| {row['checkpoint']} | {sa:.3f} | {ra:.3f} | {ra - sa:+.3f} |"
+            )
+
+    out_md = Path(args.out_md)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_md.write_text("\n".join(lines) + "\n")
+    print(f"wrote {out_md}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
