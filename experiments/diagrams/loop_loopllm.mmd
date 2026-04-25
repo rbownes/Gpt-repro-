@@ -1,0 +1,19 @@
+graph LR
+    subgraph "Standard transformer (n_layer=12, untied)"
+        X1["x"] --> B1["Block₁<br/>params: 7.08M"]
+        B1 --> B2["Block₂<br/>params: 7.08M"]
+        B2 --> Bdots["… 9 more …"]
+        Bdots --> B12["Block₁₂<br/>params: 7.08M"]
+        B12 --> Y1["x_out<br/>(unique params: 12 × 7.08M = 85M)"]
+    end
+
+    subgraph "LoopLLM (n_layer=1 module, K=12 iterations, weight-tied)"
+        X2["x"] --> SHARED["SharedBlock f<br/>params: 7.08M"]
+        SHARED --> SHARED
+        SHARED --> Y2["x_out = f¹²(x)<br/>(unique params: 7.08M, applied 12×)"]
+    end
+
+    style B1 fill:#e3f2fd,stroke:#1565c0
+    style B2 fill:#e3f2fd,stroke:#1565c0
+    style B12 fill:#e3f2fd,stroke:#1565c0
+    style SHARED fill:#ffeb3b,stroke:#f57f17,stroke-width:3px

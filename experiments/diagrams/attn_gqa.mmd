@@ -1,0 +1,29 @@
+graph LR
+    subgraph "Standard MHA (baseline / v0.3)"
+        XA["x"] --> QA["Q: 12 heads × 64"]
+        XA --> KA["K: 12 heads × 64"]
+        XA --> VA["V: 12 heads × 64"]
+        QA --> SDPA1[SDPA]
+        KA --> SDPA1
+        VA --> SDPA1
+        SDPA1 --> OA["out"]
+    end
+
+    subgraph "Grouped Query Attention (exp/05)"
+        XB["x"] --> QB["Q: 12 heads × 64"]
+        XB --> KB["K: 4 heads × 64"]
+        XB --> VB["V: 4 heads × 64"]
+        QB --> SDPA2["SDPA<br/>enable_gqa=True<br/>broadcasts K,V to 12 heads"]
+        KB --> SDPA2
+        VB --> SDPA2
+        SDPA2 --> OB["out"]
+    end
+
+    style QA fill:#e3f2fd,stroke:#1565c0
+    style KA fill:#e3f2fd,stroke:#1565c0
+    style VA fill:#e3f2fd,stroke:#1565c0
+    style QB fill:#e3f2fd,stroke:#1565c0
+    style KB fill:#fff3e0,stroke:#e65100
+    style VB fill:#fff3e0,stroke:#e65100
+    style SDPA1 fill:#fce4ec,stroke:#c2185b
+    style SDPA2 fill:#fce4ec,stroke:#c2185b

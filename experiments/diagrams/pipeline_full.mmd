@@ -1,0 +1,32 @@
+graph TD
+    DATA1["FineWeb-Edu 10B tokens"]
+    DATA1 --> PRE["Pretrain (×8 variants)<br/>~14h GPU each"]
+    PRE --> CKPT1["8 × runs/{ckpt}/best_val.pt<br/>124M / 114M / 115M / 45M params"]
+    CKPT1 --> EVAL1["LL eval battery<br/>HellaSwag, MMLU, ARC-E, ARC-C"]
+    CKPT1 --> SFT["SFT on SmolTalk<br/>500M tokens<br/>fresh AdamW per ckpt<br/>~3.5h GPU each"]
+    EVAL1 --> METRICS1["pre-SFT LL acc"]
+    SFT --> CKPT2["8 × runs/sft-{ckpt}/best_val.pt"]
+    CKPT2 --> EVAL2["same LL battery<br/>+ generative MC eval<br/>(format-compliance probe)"]
+    EVAL2 --> METRICS2["post-SFT LL acc<br/>+ pre-RL gen acc<br/>+ parse_failure_rate"]
+    CKPT2 --> RL["GRPO RL<br/>on ARC-E+ARC-C+MMLU-aux+HSwag train<br/>500 steps × P=2 G=16<br/>~7 min GPU each"]
+    RL --> CKPT3["8 × runs/rl-{ckpt}/best_val.pt"]
+    CKPT3 --> EVAL3["generative MC eval"]
+    EVAL3 --> METRICS3["post-RL gen acc"]
+    METRICS1 --> AGG[experiments/15-rl-matrix/master_matrix.json]
+    METRICS2 --> AGG
+    METRICS3 --> AGG
+    AGG --> REPORT["RETROSPECTIVE.md"]
+
+    classDef data fill:#e1f5fe,stroke:#0277bd
+    classDef train fill:#fff3e0,stroke:#e65100
+    classDef ckpt fill:#e8f5e9,stroke:#2e7d32
+    classDef eval fill:#fce4ec,stroke:#c2185b
+    classDef metric fill:#f3e5f5,stroke:#6a1b9a
+    classDef report fill:#ffeb3b,stroke:#f57f17,stroke-width:3px
+
+    class DATA1 data
+    class PRE,SFT,RL train
+    class CKPT1,CKPT2,CKPT3 ckpt
+    class EVAL1,EVAL2,EVAL3 eval
+    class METRICS1,METRICS2,METRICS3,AGG metric
+    class REPORT report

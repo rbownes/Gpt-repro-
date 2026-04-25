@@ -1,0 +1,32 @@
+graph TD
+    X["x (B, T, 768)"]
+    X --> QPROJ["W_q · x<br/>→ Q (12 heads × (32+32))"]
+    QPROJ --> QSPLIT["split"]
+    QSPLIT --> QNOPE["Q_nope: 12 × 32<br/>(content)"]
+    QSPLIT --> QPE["Q_pe: 12 × 32<br/>(positional)"]
+    QPE --> QROPE[RoPE rotation]
+
+    X --> KVDOWN["W_kv_down · x<br/>→ c_kv (256-dim latent)"]
+    KVDOWN --> KUP["W_uk · c_kv<br/>→ K_nope (12 × 32)"]
+    KVDOWN --> VUP["W_uv · c_kv<br/>→ V (12 × 64)"]
+
+    X --> KPE_PROJ["W_k_pe · x<br/>→ K_pe (1 × 32, shared across heads)"]
+    KPE_PROJ --> KROPE[RoPE rotation]
+
+    QNOPE --> ATTN["Attn = softmax<br/>(Q_nope·K_nope&#x1D40; + Q_pe·K_pe&#x1D40;) / √(64)"]
+    KUP --> ATTN
+    QROPE --> ATTN
+    KROPE --> ATTN
+    VUP --> WEIGHTED["Attn · V"]
+    ATTN --> WEIGHTED
+    WEIGHTED --> OUT["W_o · concat<br/>→ output (768)"]
+
+    classDef latent fill:#e1f5fe,stroke:#0277bd
+    classDef rope fill:#ffebee,stroke:#c62828
+    classDef attn fill:#fce4ec,stroke:#c2185b
+    classDef out fill:#e8f5e9,stroke:#2e7d32
+
+    class KVDOWN,KUP,VUP latent
+    class QROPE,KROPE rope
+    class ATTN,WEIGHTED attn
+    class OUT out

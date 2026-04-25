@@ -1,0 +1,39 @@
+graph TD
+    X["x &lt;sub&gt;in&lt;/sub&gt; (B, T, 768)"]
+    X --> RMS1["RMSNorm<br/>x · γ / √(mean(x²) + ε)"]
+    RMS1 --> Q[Linear → Q]
+    RMS1 --> K[Linear → K]
+    RMS1 --> V[Linear → V]
+    Q --> QKN1["RMSNorm(Q) per head"]
+    K --> QKN2["RMSNorm(K) per head"]
+    QKN1 --> ROPE_Q["RoPE rotation<br/>Q' = Q · R(θ)"]
+    QKN2 --> ROPE_K["RoPE rotation<br/>K' = K · R(θ)"]
+    ROPE_Q --> ATTN[SDPA causal]
+    ROPE_K --> ATTN
+    V --> ATTN
+    ATTN --> PROJ[Linear → 768]
+    PROJ --> R1["+ residual"]
+    X --> R1
+    R1 --> RMS2[RMSNorm]
+    RMS2 --> WG[Linear 768 → 2048]
+    RMS2 --> WU[Linear 768 → 2048]
+    WG --> SILU["SiLU(·)"]
+    SILU --> GATE["⊙ (Hadamard)"]
+    WU --> GATE
+    GATE --> WD[Linear 2048 → 768]
+    WD --> R2["+ residual"]
+    R1 --> R2
+    R2 --> XOUT["x &lt;sub&gt;out&lt;/sub&gt;"]
+
+    classDef norm fill:#e1f5fe,stroke:#0277bd
+    classDef linear fill:#f3e5f5,stroke:#6a1b9a
+    classDef act fill:#fff3e0,stroke:#e65100
+    classDef attn fill:#fce4ec,stroke:#c2185b
+    classDef residual fill:#e8f5e9,stroke:#2e7d32
+    classDef rope fill:#ffebee,stroke:#c62828
+    class RMS1,RMS2,QKN1,QKN2 norm
+    class Q,K,V,PROJ,WG,WU,WD linear
+    class SILU,GATE act
+    class ATTN attn
+    class R1,R2 residual
+    class ROPE_Q,ROPE_K rope

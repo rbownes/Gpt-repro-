@@ -1,0 +1,195 @@
+"""Produce the matplotlib figures used by experiments/RETROSPECTIVE.md.
+
+Reads the master_matrix.json (and per-ckpt training metrics where
+helpful) and saves PNGs under experiments/RETROSPECTIVE_assets/.
+
+Figures:
+    fig_pretrain_val.png       — per-ckpt pretrain val_loss (bar)
+    fig_sft_val.png            — per-ckpt SFT best val (bar)
+    fig_delta_rl.png           — Δ_RL per ckpt × task (grouped bar)
+    fig_ll_vs_gen_gap.png      — pre-RL LL→gen gap per ckpt × task
+    fig_rl_trajectory.png      — eval_r vs step for the 8 RL runs
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+CKPTS = ["baseline", "01-modern-block", "02-muon", "03-modded-tricks",
+         "05-speed-pack", "06-muon-mup", "10-mla", "11-loopllm"]
+SHORT = {"baseline": "base", "01-modern-block": "01-mod",
+         "02-muon": "02-muon", "03-modded-tricks": "03-trk",
+         "05-speed-pack": "05-pak", "06-muon-mup": "06-mup",
+         "10-mla": "10-mla", "11-loopllm": "11-loop"}
+TASKS = ["hswag", "mmlu", "arc_e", "arc_c"]
+TASK_LABELS = ["HellaSwag", "MMLU", "ARC-E", "ARC-C"]
+
+# Pretrain val from metrics.jsonl, hard-coded from final read (2026-04-25)
+PRETRAIN_VAL = {
+    "baseline": 3.041, "01-modern-block": 2.988, "02-muon": 2.988,
+    "03-modded-tricks": 2.964, "05-speed-pack": 2.992, "06-muon-mup": 2.974,
+    "10-mla": 2.981, "11-loopllm": 3.406,
+}
+
+SFT_BEST = {
+    "baseline": 1.345, "01-modern-block": 1.308, "02-muon": 1.498,
+    "03-modded-tricks": 1.292, "05-speed-pack": 1.324, "06-muon-mup": 1.259,
+    "10-mla": 1.304, "11-loopllm": 1.712,
+}
+
+CLUSTER = {
+    "baseline": "clean", "01-modern-block": "clean", "03-modded-tricks": "clean",
+    "10-mla": "clean", "05-speed-pack": "degraded", "06-muon-mup": "degraded",
+    "02-muon": "shattered", "11-loopllm": "shattered",
+}
+CLUSTER_COLOR = {"clean": "#2ca02c", "degraded": "#ff7f0e", "shattered": "#d62728"}
+
+
+def load_matrix(path: Path) -> list[dict]:
+    return json.loads(path.read_text())["rows"]
+
+
+def fig_pretrain_val(out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(9, 4))
+    xs = list(range(len(CKPTS)))
+    vals = [PRETRAIN_VAL[c] for c in CKPTS]
+    colors = [CLUSTER_COLOR[CLUSTER[c]] for c in CKPTS]
+    ax.bar(xs, vals, color=colors)
+    ax.axhline(PRETRAIN_VAL["03-modded-tricks"], color="gray", linestyle="--", linewidth=1,
+               label="v0.3 baseline (2.964)")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([SHORT[c] for c in CKPTS], rotation=15)
+    ax.set_ylabel("val loss @ 10B tokens")
+    ax.set_title("Pretrain val loss (lower = better) — colour by SFT cluster")
+    ax.set_ylim(2.9, 3.5)
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_pretrain_val.png", dpi=120)
+    plt.close()
+
+
+def fig_sft_val(out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(9, 4))
+    xs = list(range(len(CKPTS)))
+    vals = [SFT_BEST[c] for c in CKPTS]
+    colors = [CLUSTER_COLOR[CLUSTER[c]] for c in CKPTS]
+    ax.bar(xs, vals, color=colors)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([SHORT[c] for c in CKPTS], rotation=15)
+    ax.set_ylabel("SFT best val loss")
+    ax.set_title("SFT best val (lower = better) — colour by SFT cluster")
+    ax.set_ylim(1.0, 1.8)
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_sft_val.png", dpi=120)
+    plt.close()
+
+
+def fig_delta_rl(rows: list[dict], out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5))
+    n_tasks = len(TASKS)
+    width = 0.18
+    xs = np.arange(len(CKPTS))
+    for i, (t, label) in enumerate(zip(TASKS, TASK_LABELS)):
+        deltas = [r.get(f"{t}_delta_rl", 0) for r in rows]
+        deltas = [d if d is not None else 0 for d in deltas]
+        ax.bar(xs + (i - n_tasks/2 + 0.5) * width, deltas, width, label=label)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([SHORT[c] for c in CKPTS], rotation=15)
+    ax.set_ylabel("Δ_RL (post-RL − pre-RL gen acc)")
+    ax.set_title("RL Δ per checkpoint × task — shattered cluster dominates")
+    ax.axhline(0, color="black", linewidth=0.5)
+    ax.legend(loc="upper left")
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_delta_rl.png", dpi=120)
+    plt.close()
+
+
+def fig_ll_vs_gen_gap(rows: list[dict], out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5))
+    n_tasks = len(TASKS)
+    width = 0.18
+    xs = np.arange(len(CKPTS))
+    for i, (t, label) in enumerate(zip(TASKS, TASK_LABELS)):
+        gaps = []
+        for r in rows:
+            ll = r.get(f"{t}_sft_ll")
+            gen = r.get(f"{t}_sft_gen")
+            gaps.append(ll - gen if (ll is not None and gen is not None) else 0)
+        ax.bar(xs + (i - n_tasks/2 + 0.5) * width, gaps, width, label=label)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([SHORT[c] for c in CKPTS], rotation=15)
+    ax.set_ylabel("LL → gen gap (positive = LL > gen)")
+    ax.set_title("Pre-RL verbalisation gap: 'unverbalised knowledge' per ckpt × task")
+    ax.axhline(0, color="black", linewidth=0.5)
+    ax.legend(loc="upper left")
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_ll_vs_gen_gap.png", dpi=120)
+    plt.close()
+
+
+def _read_jsonl(p: Path) -> list[dict]:
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def fig_rl_trajectory(out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for ckpt in CKPTS:
+        events = _read_jsonl(Path(f"runs/rl-{ckpt}/metrics.jsonl"))
+        evals = [(e["step"], e["eval_reward"]) for e in events if e.get("event") == "eval"]
+        if not evals:
+            continue
+        steps, rewards = zip(*evals)
+        color = CLUSTER_COLOR[CLUSTER[ckpt]]
+        linestyle = "-" if CLUSTER[ckpt] != "shattered" else "--"
+        ax.plot(steps, rewards, label=SHORT[ckpt], color=color, linestyle=linestyle, alpha=0.85)
+    ax.set_xlabel("RL step")
+    ax.set_ylabel("eval reward (held-out 64-prompt MC subset)")
+    ax.set_title("RL eval reward trajectory — shattered cluster catches up")
+    ax.legend(loc="lower right", ncol=2, fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "fig_rl_trajectory.png", dpi=120)
+    plt.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--matrix", default="experiments/15-rl-matrix/master_matrix.json")
+    ap.add_argument("--out-dir", default="experiments/RETROSPECTIVE_assets")
+    args = ap.parse_args()
+
+    rows = load_matrix(Path(args.matrix))
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fig_pretrain_val(out_dir)
+    fig_sft_val(out_dir)
+    fig_delta_rl(rows, out_dir)
+    fig_ll_vs_gen_gap(rows, out_dir)
+    fig_rl_trajectory(out_dir)
+    print(f"wrote 5 PNGs under {out_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

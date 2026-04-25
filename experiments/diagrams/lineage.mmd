@@ -1,0 +1,36 @@
+graph LR
+    BL["exp/00 baseline<br/>GPT-2 124M faithful<br/>val 3.041"]
+    M01["exp/01 modern-block<br/>RoPE+RMSNorm+SwiGLU+QKnorm<br/>val 2.988 ★"]
+    M02["exp/02 muon<br/>+ Muon optimiser<br/>val 2.988 (rejected)"]
+    M03["exp/03 modded-tricks<br/>+ ReLU²+0init+UNet+softcap<br/>val 2.964 ★ v0.3"]
+    M05["exp/05 speed-pack<br/>+ GQA+max-autotune−softcap<br/>val 2.992 (rejected)"]
+    M06["exp/06 muon-mup<br/>+ MuonAdamW+μP<br/>val 2.974 (rejected)"]
+    M10["exp/10 mla<br/>+ MLA<br/>val 2.981 (rejected)"]
+    M11["exp/11 loopllm<br/>+ weight-tied K=12<br/>val 3.406 (hard reject)"]
+    M14["exp/14 SFT matrix<br/>SmolTalk on all 8"]
+    M15["exp/15 RL matrix<br/>GRPO MC-extract on all 8"]
+
+    BL --> M01
+    M01 --> M02
+    M01 --> M03
+    M03 --> M05
+    M03 --> M06
+    M03 --> M10
+    M03 --> M11
+    M03 -.-> M14
+    BL -.-> M14
+    M01 -.-> M14
+    M02 -.-> M14
+    M05 -.-> M14
+    M06 -.-> M14
+    M10 -.-> M14
+    M11 -.-> M14
+    M14 --> M15
+
+    classDef accepted fill:#d4edda,stroke:#155724,color:#155724
+    classDef rejected fill:#f8d7da,stroke:#721c24,color:#721c24
+    classDef neutral fill:#fff3cd,stroke:#856404,color:#856404
+    class BL,M01,M03 accepted
+    class M02,M05,M06,M10 rejected
+    class M11 rejected
+    class M14,M15 neutral

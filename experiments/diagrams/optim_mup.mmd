@@ -1,0 +1,21 @@
+graph TD
+    subgraph "Standard parameterisation (SP)"
+        SP_IN["base width = 768"]
+        SP_IN --> SP_LR["all params share<br/>peak_lr = 6e-4"]
+        SP_IN --> SP_INIT["W ~ N(0, 0.02²)"]
+        SP_LR --> SP_TUNE["LR re-tuning needed<br/>at each new width"]
+    end
+
+    subgraph "Maximal Update Parameterisation (μP)"
+        MUP_IN["base width = w_base<br/>target width = w"]
+        MUP_IN --> MUP_RATIO["width_mult m = w / w_base"]
+        MUP_RATIO --> MUP_LR["matrix params: lr ← peak_lr / m<br/>vector params: lr ← peak_lr"]
+        MUP_RATIO --> MUP_INIT["matrix params: σ ← σ_base / √m"]
+        MUP_LR --> MUP_TRANSFER["LR found at w_base<br/>transfers to any width"]
+    end
+
+    classDef sp fill:#ffebee,stroke:#c62828
+    classDef mup fill:#e8f5e9,stroke:#2e7d32
+
+    class SP_IN,SP_LR,SP_INIT,SP_TUNE sp
+    class MUP_IN,MUP_RATIO,MUP_LR,MUP_INIT,MUP_TRANSFER mup

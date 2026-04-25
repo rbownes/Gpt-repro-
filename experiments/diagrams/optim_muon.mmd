@@ -1,0 +1,20 @@
+graph LR
+    G["raw gradient G<br/>(possibly low-rank<br/>or skewed singular values)"]
+    G --> NS1["NS step 1<br/>X ← 1.5·X − 0.5·X·X&#x1D40;·X"]
+    NS1 --> NS2["NS step 2"]
+    NS2 --> NS3["NS step 3"]
+    NS3 --> NS4["NS step 4"]
+    NS4 --> NS5["NS step 5<br/>(Polar Express variant)"]
+    NS5 --> ORTHO["G_⊥ ≈ orthogonalised G<br/>singular values clamped to ≈ 1<br/>spectral norm bounded"]
+    ORTHO --> NORMU["NorMuon<br/>per-neuron variance scaling"]
+    NORMU --> UPDATE["θ ← θ − lr · G_norm"]
+
+    classDef raw fill:#ffebee,stroke:#c62828
+    classDef ns fill:#fff3e0,stroke:#e65100
+    classDef ortho fill:#e8f5e9,stroke:#2e7d32
+    classDef step fill:#e1f5fe,stroke:#0277bd
+
+    class G raw
+    class NS1,NS2,NS3,NS4,NS5 ns
+    class ORTHO ortho
+    class NORMU,UPDATE step

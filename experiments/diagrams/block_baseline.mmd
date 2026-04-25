@@ -1,0 +1,32 @@
+graph TD
+    X["x &lt;sub&gt;in&lt;/sub&gt; (B, T, 768)"]
+    X --> LN1[LayerNorm]
+    LN1 --> Q[Linear → Q]
+    LN1 --> K[Linear → K]
+    LN1 --> V[Linear → V]
+    Q --> POSQ["+ learned pos"]
+    K --> POSK["+ learned pos"]
+    POSQ --> ATTN[scaled-dot-product attn<br/>causal mask]
+    POSK --> ATTN
+    V --> ATTN
+    ATTN --> PROJ[Linear → 768]
+    PROJ --> R1["+ residual"]
+    X --> R1
+    R1 --> LN2[LayerNorm]
+    LN2 --> FC1[Linear 768 → 3072]
+    FC1 --> GELU["GELU(·)"]
+    GELU --> FC2[Linear 3072 → 768]
+    FC2 --> R2["+ residual"]
+    R1 --> R2
+    R2 --> XOUT["x &lt;sub&gt;out&lt;/sub&gt;"]
+
+    classDef norm fill:#e1f5fe,stroke:#0277bd
+    classDef linear fill:#f3e5f5,stroke:#6a1b9a
+    classDef act fill:#fff3e0,stroke:#e65100
+    classDef attn fill:#fce4ec,stroke:#c2185b
+    classDef residual fill:#e8f5e9,stroke:#2e7d32
+    class LN1,LN2 norm
+    class Q,K,V,PROJ,FC1,FC2 linear
+    class GELU,POSQ,POSK act
+    class ATTN attn
+    class R1,R2 residual
