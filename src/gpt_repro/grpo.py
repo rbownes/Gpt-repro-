@@ -88,8 +88,11 @@ def compute_grpo_loss(
     # and `model.forward` does `targets.view(-1)` internally.
     inp = inp_full[:, :-1].contiguous()
     tgt = inp_full[:, 1:].contiguous()
+    # `return_full_logits=True` returns (B, T-1, V) without computing the
+    # internal cross-entropy whose fp32 intermediate would OOM at our
+    # batch sizes (~10 GiB at B*T=128*400, V=50257).
     with torch.autocast(device_type=device.type, dtype=amp_dtype):
-        logits, _ = policy(inp, tgt)
+        logits, _ = policy(inp, return_full_logits=True)
     # Compute log P(tgt | inp) at every position WITHOUT materialising the
     # full (B, T-1, V) log-softmax tensor — that intermediate is several GB
     # at our prompt lengths and trips OOM. logsumexp is max-shifted so it's

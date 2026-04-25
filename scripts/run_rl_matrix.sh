@@ -17,8 +17,14 @@ set -euo pipefail
 
 CHECKPOINTS=${CHECKPOINTS:-"baseline 01-modern-block 02-muon 03-modded-tricks 05-speed-pack 06-muon-mup 10-mla 11-loopllm"}
 N_STEPS=${N_STEPS:-500}
-PROMPTS_PER_STEP=${PROMPTS_PER_STEP:-8}
+# P=2, G=16 = 32 rollouts/step. HellaSwag prompts can hit ~500 tokens;
+# at P=4 the (B*T*V) bf16 logits + autograd context exceed 30 GiB.
+# Group size matters more than prompt diversity for advantage
+# normalisation, so we keep G=16 and lower P.
+PROMPTS_PER_STEP=${PROMPTS_PER_STEP:-2}
 GROUP_SIZE=${GROUP_SIZE:-16}
+# Reduce CUDA allocator fragmentation under variable-length sequences.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 KL_COEF=${KL_COEF:-0.04}
 PEAK_LR=${PEAK_LR:-1e-6}
 SAT_THRESH=${SAT_THRESH:-0.95}

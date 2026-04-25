@@ -95,10 +95,11 @@ def _score_rollout(
     full = torch.tensor([prompt_ids + gen_ids], dtype=torch.long, device=device)
     inp = full[:, :-1].contiguous()
     tgt = full[:, 1:].contiguous()
-    # Pass `tgt` so model returns full-sequence logits (without targets it
-    # only returns the last position — the inference fast-path).
+    # Use return_full_logits to skip the model's internal cross-entropy:
+    # we discard the loss anyway and the CE fp32 intermediate is wasted
+    # memory at large B*T*V.
     with torch.autocast(device_type=inp.device.type, dtype=amp_dtype):
-        logits, _ = model(inp, tgt)
+        logits, _ = model(inp, return_full_logits=True)
     # Memory-frugal log-prob: gather + logsumexp instead of full log-softmax,
     # so we never materialise the (1, T-1, V) fp32 tensor.
     gathered = logits.gather(-1, tgt[:, :, None]).squeeze(-1)   # (1, T-1)

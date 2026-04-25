@@ -525,7 +525,23 @@ class GPT(nn.Module):
         self,
         idx: torch.Tensor,
         targets: torch.Tensor | None = None,
+        *,
+        return_full_logits: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Forward pass.
+
+        Default behaviour:
+        - `targets is None`: inference fast-path — return logits at the
+          last position only (shape `(B, 1, V)`).
+        - `targets is not None`: training path — return full-sequence
+          logits (`(B, T, V)`) plus cross-entropy loss.
+
+        `return_full_logits=True` (with `targets is None`) returns the
+        full-sequence logits without computing cross-entropy. Used by
+        the GRPO scoring path which needs every position's distribution
+        but discards the model's CE — saving the ~10 GiB fp32 CE
+        intermediate at large `B*T*V`.
+        """
         B, T = idx.shape
         assert T <= self.cfg.block_size, f"sequence length {T} > block_size {self.cfg.block_size}"
 
@@ -568,8 +584,15 @@ class GPT(nn.Module):
                 x = block(x, cos=cos, sin=sin)
         x = self.transformer.ln_f(x)
 
-        if targets is None:
+        if targets is None and not return_full_logits:
             logits = self._maybe_softcap(self.lm_head(x[:, [-1], :]))
+            return logits, None
+
+        if targets is None:
+            # Full-logits path without targets — used by GRPO rollout
+            # scoring which computes its own log-probs at gathered
+            # positions and skips cross-entropy entirely.
+            logits = self._maybe_softcap(self.lm_head(x))
             return logits, None
 
         if self.cfg.use_liger_fused_ce:
