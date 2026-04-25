@@ -106,3 +106,20 @@ def marker_token_counts() -> dict[str, int]:
         "ASSISTANT_OPEN": len(enc.encode_ordinary(ASSISTANT_OPEN)),
         "ASSISTANT_CLOSE": len(enc.encode_ordinary(ASSISTANT_CLOSE)),
     }
+
+
+def render_user_turn(prompt: str) -> list[int]:
+    """Render a single user turn ending with the open `<assistant>` marker.
+
+    The model continues from this prefix in its assistant role — used by
+    the generative-eval and RL rollout paths. Mirrors `render_conversation`
+    for the first user turn but stops at the assistant trigger so the model
+    has only to emit content + closing `</assistant>`.
+    """
+    enc = get_encoding()
+    ids: list[int] = [EOT_ID]
+    ids.extend(enc.encode_ordinary(USER_OPEN))
+    ids.extend(enc.encode_ordinary(prompt))
+    ids.extend(enc.encode_ordinary(USER_CLOSE))
+    ids.extend(enc.encode_ordinary(ASSISTANT_OPEN))
+    return ids
