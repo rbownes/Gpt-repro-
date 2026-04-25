@@ -130,9 +130,15 @@ def generate_group(
     Returns `[]` if `len(prompt_ids) + max_new_tokens` exceeds the
     model's block_size — no truncation is safe for MC scoring (the
     question would be cut off). Caller treats an empty group as "skip".
+
+    Also returns `[]` if the prompt is so long that the resulting
+    batched-loss tensor (B*T*V) would push GPU memory over budget on a
+    32 GiB card. Empirically `prompt_ids + max_new_tokens` ≲ 768 tokens
+    is the safe limit at P=2 G=16 with our 124 M model.
     """
     block_size = policy.cfg.block_size if hasattr(policy, "cfg") else 1024
-    if len(prompt_ids) + max_new_tokens > block_size:
+    soft_cap = min(block_size, 768)
+    if len(prompt_ids) + max_new_tokens > soft_cap:
         return []
 
     rollouts: list[Rollout] = []

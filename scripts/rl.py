@@ -259,6 +259,11 @@ def main() -> int:
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(policy.parameters(), args.grad_clip)
         optim.step()
+        # Free fragmented memory between steps. Variable-length rollouts
+        # cause peak-memory swings that fragment the allocator; releasing
+        # cached blocks costs ~5 ms but prevents OOM on later long batches.
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
         if (step + 1) % args.log_every == 0 or step == 0:
             log.log({
