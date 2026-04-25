@@ -126,10 +126,16 @@ def quick_eval_reward(
     from gpt_repro.chat import ASSISTANT_CLOSE
     from gpt_repro.rollout import _sample_one
     stop = (EOT_ID, enc.encode_ordinary(ASSISTANT_CLOSE)[0])
+    block_size = policy.cfg.block_size if hasattr(policy, "cfg") else 1024
     rewards = []
     for ex in examples:
         prompt = format_mc_prompt(ex.question, ex.choices)
         ids = render_user_turn(prompt)
+        if len(ids) + max_new_tokens > block_size:
+            # Skip oversize prompts (rare HellaSwag cases). Counting them
+            # as 0 would unfairly penalise the model for a context-length
+            # limitation it can't fix.
+            continue
         gen = _sample_one(
             policy, ids, max_new_tokens=max_new_tokens,
             temperature=1.0, top_k=1, amp_dtype=amp_dtype, stop_token_ids=stop,

@@ -126,7 +126,15 @@ def generate_group(
 
     Reward is left at 0.0 — the caller fills it in after decoding the
     text and computing whatever task-specific reward applies.
+
+    Returns `[]` if `len(prompt_ids) + max_new_tokens` exceeds the
+    model's block_size — no truncation is safe for MC scoring (the
+    question would be cut off). Caller treats an empty group as "skip".
     """
+    block_size = policy.cfg.block_size if hasattr(policy, "cfg") else 1024
+    if len(prompt_ids) + max_new_tokens > block_size:
+        return []
+
     rollouts: list[Rollout] = []
     for _ in range(n_samples):
         gen_ids = _sample_one(
